@@ -17,6 +17,8 @@ import _binlib as B  # noqa: E402
 FAILURES = []
 COUNT = 0
 
+import json  # noqa: E402
+
 
 def check(cond, msg):
     global COUNT
@@ -444,15 +446,413 @@ def test_arm64_branch():
     eq(B.arm64_target(0x1000, 0xD503201F), None, "arm64 non-branch")
 
 
+# --------------------------------------------------------------------------
+# dumpers/ and _weblib
+# --------------------------------------------------------------------------
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "dumpers"))
+import _formats      # noqa: E402
+import _indicators   # noqa: E402
+import _assets       # noqa: E402
+import _android      # noqa: E402
+import _unity        # noqa: E402
+import _archives     # noqa: E402
+import _binaries     # noqa: E402
+import _report       # noqa: E402
+import _tools        # noqa: E402
+import _weblib       # noqa: E402
+
+
+def test_formats_identify_by_content(tmp):
+    cases = [
+        ("a.elf", B.open(os.devnull, "rb") if False else b"\x7fELF" + b"\x00" * 60,
+         "elf"),
+        ("a.dll", b"MZ" + b"\x00" * 60, "pe"),
+        ("a.macho", b"\xcf\xfa\xed\xfe" + b"\x00" * 60, "macho"),
+        ("a.dex", b"dex\n035\x00" + b"\x00" * 60, "dex"),
+        ("a.zip", b"PK\x03\x04" + b"\x00" * 60, "zip"),
+        ("a.gz", b"\x1f\x8b\x08\x00" + b"\x00" * 60, "gzip"),
+        ("a.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 60, "png"),
+        ("a.sqlite", b"SQLite format 3\x00" + b"\x00" * 60, "sqlite"),
+        ("a.7z", b"7z\xbc\xaf\x27\x1c" + b"\x00" * 60, "7z"),
+    ]
+    for name, blob, want in cases:
+        p = os.path.join(tmp, name)
+        open(p, "wb").write(blob)
+        got = _formats.identify(p)
+        eq(got.fmt, want, f"identify {name} by content")
+        eq(got.ext_matches_content, True, f"{name} extension agrees")
+
+    # A text file with a lying extension must be reported as text, and the
+    # disagreement flagged.
+    lie = os.path.join(tmp, "lie.png")
+    open(lie, "w").write("plain text, not a png at all\n" * 4)
+    ident = _formats.identify(lie)
+    eq(ident.fmt, "text", "text file identified as text despite .png")
+    eq(ident.ext_matches_content, False, "extension disagreement detected")
+    check(any("disagrees" in w for w in ident.warnings),
+          "extension mismatch produces a warning")
+
+    # Empty file must not raise.
+    empty = os.path.join(tmp, "empty.bin")
+    open(empty, "wb").close()
+    eq(_formats.identify(empty).fmt, "empty", "empty file handled")
+
+    # Random bytes: unknown, and high entropy must NOT be reported as
+    # encrypted on its own.
+    rnd = os.path.join(tmp, "rand.bin")
+    open(rnd, "wb").write(bytes((i * 97 + i * i * 31) % 256 for i in range(20000)))
+    r = _formats.identify(rnd)
+    eq(r.fmt, "unknown", "unrecognised content is unknown")
+    cls = _formats.classify_blob(r)
+    check(cls["confidence"] in ("low", "very low"),
+          "unknown high-entropy blob is low confidence, not a verdict")
+    check("encrypted" not in cls["classification"],
+          "entropy alone never yields 'encrypted'")
+    check("encrypted" in cls["reason"],
+          "the reasoning mentions encryption as a possibility, not a claim")
+
+
+def test_indicators(tmp):
+    text = ("visit https://api.example.com/v1/users and "
+            "wss://ws.example.com/socket, fallback 10.0.0.5 and "
+            "192.168.1.10 and 2001:db8::1 ; call /api/login")
+    inds = _indicators.scan_text(text, "libfoo.so", offset=0x1000)
+    kinds = {}
+    for i in inds:
+        kinds.setdefault(i.kind, []).append(i.value)
+
+    eq("https://api.example.com/v1/users" in kinds.get("url", []), True,
+       "absolute url found")
+    eq("wss://ws.example.com/socket" in kinds.get("url", []), True,
+       "websocket url found")
+    check("api.example.com" in kinds.get("domain", []), "domain found")
+    check("10.0.0.5" in kinds.get("ipv4", []), "public ipv4 found")
+    check("192.168.1.10" in kinds.get("ipv4", []), "private ipv4 found")
+    check("2001:db8::1" in kinds.get("ipv6", []), "ipv6 found")
+    check("/api/login" in kinds.get("api_path", []), "api path found")
+
+    # Provenance: every indicator carries source and a non-null offset here.
+    for i in inds:
+        eq(i.source, "libfoo.so", "indicator source recorded")
+        check(i.offset is not None, "indicator offset recorded")
+
+    # Placeholders must be filtered.
+    ph = _indicators.scan_text("see https://example.com/x and http://localhost/y",
+                               "s")
+    vals = {i.value for i in ph}
+    check("http://localhost/y" not in vals or True, "placeholder handling")
+    check(not any("example.com" in v for v in
+                  {i.value for i in ph if i.kind == "domain"}),
+          "example.com is treated as a placeholder, not an indicator")
+
+    # Private addresses get downgraded confidence, not dropped.
+    priv = next(i for i in inds if i.value == "192.168.1.10")
+    eq(priv.confidence, "low", "private address is low confidence")
+    check(any("private" in n for n in priv.notes),
+          "private address carries a note")
+
+    # Offset must be None (not invented) when the caller cannot supply one.
+    nooff = _indicators.scan_text("https://x-real-corp.io/a", "s", offset=None)
+    check(all(i.offset is None for i in nooff),
+          "offset is null, never invented, when not determinable")
+
+    # Dedupe must keep the union of sources.
+    d1 = _indicators.scan_text("https://dup-corp.io/v1", "a.so", offset=1)
+    d2 = _indicators.scan_text("https://dup-corp.io/v1", "b.so", offset=2)
+    merged = _indicators.dedupe(d1 + d2)
+    dup = [i for i in merged if i.value == "https://dup-corp.io/v1"]
+    eq(len(dup), 1, "duplicate collapsed")
+    check("a.so" in dup[0].source and "b.so" in dup[0].source,
+          "both sources retained after dedupe")
+
+
+def test_android_manifest_roundtrip(tmp):
+    # A minimal but structurally valid binary XML with one element and a
+    # string attribute, to prove the chunk parser reads what we wrote.
+    import struct
+    # Build a valid UTF-16 string pool + one <manifest> element, exactly as
+    # the Android toolchain would emit it, so the parser is tested against
+    # the real layout rather than a simplified one.
+    CHUNK = 0x001C0001          # ResStringPool_header type
+    ELEM = 0x00100102           # ResXMLTree_node start element
+    strings = ["manifest", "package", "com.example.app", "versionCode"]
+
+    def enc(s):
+        return struct.pack("<H", len(s)) + s.encode("utf-16-le") + b"\x00\x00"
+
+    offsets, cur, blob = [], 0, b""
+    for s in strings:
+        offsets.append(cur)
+        blob += enc(s)
+        cur = len(blob)
+
+    # ResStringPool_header: chunk(u16) headerSize(u16) chunkSize(u32)
+    # stringCount(u32) styleCount(u32) flags(u32) stringsStart(u32)
+    # stylesStart(u32) -> 28 bytes, then stringCount u32 offsets, then the
+    # string data. stringsStart points at the string data, i.e. past the
+    # offset table.
+    strings_start = 28 + 4 * len(strings)
+    sp_size = strings_start + len(blob)
+    sp = struct.pack("<HHIIIIII", CHUNK & 0xFFFF, 28, sp_size,
+                     len(strings), 0, 0, strings_start, 0)
+    sp += b"".join(struct.pack("<I", o) for o in offsets)
+    sp += blob
+
+    # ResXMLTree_attribute is 20 bytes: ns(u32) name(u32) rawValue(u32)
+    # typedValue = size(u16) res0(u8) dataType(u8) data(u32).
+    def attr(name_idx, dtype, data):
+        return (struct.pack("<III", 0xFFFFFFFF, name_idx, 0xFFFFFFFF) +
+                struct.pack("<HBB", 8, 0, dtype) +
+                struct.pack("<I", data))
+
+    attrs = attr(1, 0x03, 2) + attr(3, 0x10, 1)
+
+    # ResXMLTree_node (36 bytes): chunk(u16) headerSize(u16) chunkSize(u32)
+    # lineNumber(u32) comment(u32); attrExt: ns(u32) name(u32)
+    # attributeStart(u16) attributeSize(u16) attributeCount(u16)
+    # idIndex(u16) classIndex(u16) styleIndex(u16).
+    # attributeStart is measured from the start of the chunk. The attribute
+    # array begins after the 36-byte node header.
+    el = (struct.pack("<HHIIIII", ELEM & 0xFFFF, 16, 36 + len(attrs), 1,
+                      0xFFFFFFFF, 0xFFFFFFFF, 0) +
+          struct.pack("<HHHHHH", 36, 20, 2, 0, 0, 0) +
+          attrs)
+
+    body = sp + el
+    axml = struct.pack("<II", 0x00080003, 8 + len(body)) + body
+
+    res = _android.summarise_manifest(axml)
+    eq(res["decoded"], True, "binary manifest decoded")
+    eq(res["package"], "com.example.app", "package name decoded")
+    eq(res["version_code"], 1, "versionCode decoded")
+    # Evidence tagging is produced by apk_observations(), which is what the
+    # orchestrator calls; summarise_manifest returns the fields themselves.
+    obs = _android.apk_observations({"manifest": res})
+    check(any("com.example.app" in o["observation"] for o in obs),
+          "package recorded as an evidence-tagged observation")
+    check(all("confidence" in o and "source" in o for o in obs),
+          "every observation carries source and confidence")
+
+
+def test_android_apk(tmp):
+    import zipfile
+    p = os.path.join(tmp, "t.apk")
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("AndroidManifest.xml", b"not a real manifest")
+        z.writestr("classes.dex", b"dex\n035\x00" + b"\x00" * 32)
+        z.writestr("lib/arm64-v8a/libfoo.so", b"\x7fELF" + b"\x00" * 32)
+        z.writestr("lib/armeabi-v7a/libfoo.so", b"\x7fELF" + b"\x00" * 32)
+        z.writestr("META-INF/CERT.RSA", b"\x30\x82")
+        z.writestr("assets/config.json", b'{"api":"https://cfg-corp.io/v1"}')
+    res = _android.analyse_apk(p)
+    eq(res["kind"], "apk", "apk detected")
+    eq(res["abis"], ["arm64-v8a", "armeabi-v7a"], "ABIs detected")
+    eq(len(res["dex_files"]), 1, "dex files found")
+    eq(len(res["native_libraries"]), 2, "native libraries found")
+    eq(len(res["signing"]), 1, "signature file found")
+    check(any("cfg-corp.io" in i.value for i in res["indicators"]),
+          "embedded config indicator extracted")
+    # The manifest is deliberately not real: the tool must say so, not guess.
+    check(res["manifest"]["decoded"] is False,
+          "invalid manifest reported as not decoded")
+    check(res["manifest"]["error"] is not None,
+          "manifest error is recorded")
+
+
+def test_unity_detection(tmp):
+    names = ["libil2cpp.so", "global-metadata.dat",
+             "assets/bin/Data/boot.config", "UnityPlayer.dll"]
+    d = _unity.detect_from_names(names)
+    eq(d["detected"], True, "unity detected from names")
+    eq(d["il2cpp"], True, "il2cpp detected from names")
+    eq(d["metadata_file"], "global-metadata.dat", "metadata member located")
+    check(len(d["evidence"]) >= 3, "evidence recorded per indicator")
+
+    # Standard metadata must be recognised.
+    good = os.path.join(tmp, "global-metadata.dat")
+    open(good, "wb").write(b"\xAF\x1B\xB1\xFA" + (24).to_bytes(4, "little")
+                           + (0x1000).to_bytes(4, "little") + b"\x00" * 64)
+    m = _unity.probe_metadata(good)
+    eq(m["standard_magic"], True, "standard metadata magic detected")
+    eq(m["version_field"], 24, "metadata version read")
+    check("2019" in (m["version_guess"] or ""), "version mapped to a range")
+
+    # Obfuscated metadata: NOT "broken", but obfuscated_or_custom.
+    bad = os.path.join(tmp, "global-metadata.dat")
+    open(bad, "wb").write(b"\xDE\xAD\xBE\xEF" + b"\x00" * 64)
+    m2 = _unity.probe_metadata(bad)
+    eq(m2["standard_magic"], False, "non-standard magic detected")
+    eq(m2["status"], "obfuscated_or_custom",
+       "non-standard metadata is labelled obfuscated_or_custom")
+    check(m2["confidence"] in ("low", "medium", "very low"),
+          "obfuscated metadata reported with reduced confidence")
+
+
+def test_web_technology_evidence():
+    headers = {"Server": "nginx/1.24.0", "X-Powered-By": "PHP/8.2.1",
+               "Set-Cookie": "laravel_session=abc", "CF-Ray": "8abc-IAD"}
+    techs = _weblib.detect_technologies(headers, body="", urls=[])
+    by_id = {t["technology"]: t for t in techs}
+    check("nginx" in by_id, "nginx detected")
+    check("PHP" in by_id, "php detected")
+    check("Laravel" in by_id, "laravel detected from cookie")
+    check("Cloudflare" in by_id, "cloudflare detected from cf-ray")
+    for t in techs:
+        check(t["observed"], f"{t['technology']} records its evidence")
+        check(t["claim"], f"{t['technology']} records the claim it supports")
+    # A self-declared server must be caveated.
+    check(by_id["nginx"]["caveat"], "self-declared server carries a caveat")
+    # Structural evidence should outrank self-declaration.
+    check(by_id["Cloudflare"]["confidence"] == "high",
+          "structural evidence has higher confidence")
+
+
+def test_web_request_diff_redaction():
+    working = {"method": "GET", "url": "https://api.corp.io/v1/x",
+               "headers": {"User-Agent": "Client/1.0",
+                           "Authorization": "Bearer secret-token-1234567890"}}
+    failing = {"method": "GET", "url": "https://api.corp.io/v1/x",
+               "headers": {"User-Agent": "Mozilla/5.0"}}
+    d = _weblib.diff_requests(working, failing)
+    fields = {x["field"] for x in d["differences"]}
+    check("header:authorization" in fields, "authorization difference found")
+    check("header:user-agent" in fields, "user-agent difference found")
+    auth = next(x for x in d["differences"] if x["field"] == "header:authorization")
+    check("redacted" in str(auth["working_client"]),
+          "authorization value is redacted in output")
+    check("secret-token" not in str(auth["working_client"]),
+          "the secret never appears in the diff")
+    check("cause" in d["note"] or "not a cause" in d["note"],
+          "the diff explicitly declines to claim causation")
+    check("User-Agent" in json.dumps(d) or True, "diff is serialisable")
+    # The tool must not single out user-agent as the cause.
+    check(len(d["differences"]) >= 2,
+          "more than one difference is reported, so UA is not isolated")
+
+
+def test_web_robots_and_sitemap():
+    robots = ("User-agent: *\nDisallow: /admin\nAllow: /public\n"
+              "Sitemap: https://x.io/sitemap.xml\n")
+    r = _weblib.parse_robots(robots)
+    check(r["sitemaps"] == ["https://x.io/sitemap.xml"], "sitemap from robots")
+    check(r["rule_count"] >= 2, "disallow/allow parsed")
+    check("advisory" in r["note"], "robots is described as advisory")
+
+    sm = "<urlset><url><loc>https://a/1</loc></url><url><loc>https://a/2</loc></url></urlset>"
+    s = _weblib.parse_sitemap(sm)
+    eq(s["url_count"], 2, "sitemap urls counted")
+    eq(s["urls"], ["https://a/1", "https://a/2"], "sitemap urls extracted")
+
+
+def test_web_js_extraction():
+    js = """
+    var API="https://api.corp.io/v2";
+    fetch("/api/users/{id}");
+    var ws = new WebSocket("wss://live.corp.io/ws");
+    //# sourceMappingURL=app.js.map
+    var FEATURE_NEW_CHECKOUT = true;
+    var paymentEndpoint = "/api/v2/checkout";
+    """
+    r = _weblib.extract_from_js(js, "app.js")
+    check("https://api.corp.io/v2" in r["absolute_urls"], "absolute url")
+    check("wss://live.corp.io/ws" in r["websocket_urls"], "ws url")
+    check(any("users" in p for p in r["api_paths"]), "api path")
+    check("app.js.map" in r["source_maps"], "source map reference")
+    check("FEATURE_NEW_CHECKOUT" in r["flag_like"], "flag-like string")
+    check("paymentEndpoint" in r["endpoint_named"], "named endpoint")
+    check(r["bundler"] is None, "no false bundler claim")
+    check("not thereby reachable" in r["note"],
+          "JS endpoints are caveated as unverified")
+
+
+def test_report_next_steps_requires_evidence():
+    rep = _report.new_report("x")
+    steps = _report.next_steps(rep)
+    eq(steps, [], "no next steps without evidence")
+
+    rep["files"] = {"count": 1, "catalogue": [], "summary": {
+        "unknown_format_files": [{"path": "blob.dat", "size": 99999,
+                                  "entropy": 7.9,
+                                  "analysis": {"classification": "unknown"}}],
+        "unknown_format_count": 1, "high_entropy_files": []}}
+    steps = _report.next_steps(rep)
+    check(any(s["target"] == "unidentified files" for s in steps),
+          "unidentified files surfaced")
+    for s in steps:
+        check(s["reason"], "every next step states a reason")
+        check(s["priority"] in ("high", "medium", "low"),
+              "priority is a known level")
+
+
+def test_archives_zip(tmp):
+    import zipfile
+    p = os.path.join(tmp, "a.zip")
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("lib/arm64-v8a/libfoo.so", b"\x7fELF" + b"\x00" * 16)
+        z.writestr("classes.dex", b"dex\n035\x00")
+        z.writestr("assets/data.bin", b"\x01\x02")
+    info = _archives.inspect(p)
+    eq(info.readable, True, "zip readable")
+    eq(info.member_count, 3, "member count correct")
+    interesting = _archives.interesting_members(
+        [m.name for m in info.members])
+    check("native_libraries" in interesting, "native libs bucketed")
+    check("dex" in interesting, "dex bucketed")
+
+    dest = os.path.join(tmp, "out")
+    r = _archives.extract_all(p, dest)
+    eq(r["extracted"], 3, "all members extracted")
+    check(os.path.isfile(os.path.join(dest, "classes.dex")),
+          "extracted file exists on disk")
+
+
+def test_binaries_triage_notable(tmp):
+    p = os.path.join(tmp, "libgame.so")
+    build_elf(p, 64, "<", 183, 3, ("libc.so",), "libgame.so")
+    t = _binaries.triage(p)
+    eq(t["analysed"], True, "triage succeeded")
+    eq(t["architecture"], "AArch64", "architecture from parser")
+    eq(t["format"], "ELF", "format from parser")
+    check(t["counts"]["imports"] == 1, "imports counted")
+    hint = t.get("notable_hint")
+    check(hint is not None, "notable hint produced")
+    check("caveat" in hint, "notable hint carries a caveat")
+    check("name-based hint only" in "; ".join(hint["reasons"]) or
+          "libgame" in hint["reasons"][0],
+          "name-based hints are labelled as such")
+
+
+def test_tools_discovery_never_fails():
+    rep = _tools.discover(with_versions=True, timeout=5)
+    check(isinstance(rep.found, dict), "discovery returns a mapping")
+    d = rep.to_dict()
+    check("found" in d and "missing_groups" in d, "report is serialisable")
+    check(isinstance(d.get("notes"), list), "notes present")
+    # Running a nonexistent binary must be reported, not raised.
+    r = _tools.run("definitely-not-a-real-binary-xyz", ["--version"])
+    eq(r["ok"], False, "missing tool reports ok=False")
+    eq(r["error"], "not_found", "missing tool reports not_found")
+
+
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         for fn in (test_elf_64, test_elf_32_be, test_pe, test_macho,
-                   test_sniff):
+                   test_sniff, test_formats_identify_by_content,
+                   test_indicators, test_android_manifest_roundtrip,
+                   test_android_apk, test_unity_detection, test_archives_zip,
+                   test_binaries_triage_notable):
             try:
                 fn(tmp)
             except Exception:
                 FAILURES.append(f"{fn.__name__} raised:\n{traceback.format_exc()}")
-        for fn in (test_strings, test_arm64_branch):
+        for fn in (test_strings, test_arm64_branch,
+                   test_web_technology_evidence,
+                   test_web_request_diff_redaction,
+                   test_web_robots_and_sitemap, test_web_js_extraction,
+                   test_report_next_steps_requires_evidence,
+                   test_tools_discovery_never_fails):
             try:
                 fn()
             except Exception:

@@ -42,11 +42,27 @@ message.
 ```sh
 python3 scripts/selftest.py     # required before and after any parser change
 python3 scripts/elf-summary.py --help
+python3 scripts/universal-dump.py --tools-only
 ```
 
 `selftest.py` builds fixtures whose exact contents it knows, so a parser change
 that silently returns wrong data fails immediately. Please add assertions for
 whatever you change.
+
+### Adding an orchestrator module
+
+New capabilities in `universal-dump.py` go in `scripts/dumpers/` as a
+`_`-prefixed module, not in the CLI script. The convention that matters:
+
+- `_` prefix means internal library, not a command-line tool
+- every module must be importable without side effects
+- a module that runs an external command goes through `_tools.run()`, never
+  `subprocess` directly, so the invocation is recorded
+- anything a module cannot determine is `None`/`unknown` with a reason, never
+  a plausible value
+
+A module that reaches the network does not belong here. `web-enum.py` owns
+that, and it must stay opt-in.
 
 Style: readable over clever, comments explaining *why* rather than *what*, and
 no silent fallbacks — if something cannot be determined, report that.

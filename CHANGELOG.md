@@ -7,6 +7,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Versions are for the skill, not for a target being analysed.
 
+## [2.0.0] — 2026-10-06
+
+Web reverse engineering and automated triage added as first-class areas.
+
+### Added
+
+**Web reverse engineering**
+- `references/web-re.md` — passive vs active reconnaissance, technology
+  identification as evidence, application mapping, and the
+  client-vs-browser investigation.
+- `scripts/web-enum.py` — passive-by-default reconnaissance: DNS, TLS
+  certificate, HTTP headers, cookies, security headers, `robots.txt`,
+  `sitemap.xml`, referenced JavaScript. Records every request made.
+- `scripts/_weblib.py` — shared web parsing: technology fingerprints with
+  evidence and confidence, security-header audit, SAN classification,
+  robots/sitemap parsing, JavaScript endpoint extraction, and request
+  normalisation/diffing with credential redaction.
+- `examples/analyze-web-target.md` — the app-works-browser-fails
+  investigation, ending in a controlled one-variable-at-a-time test.
+
+**Automated triage**
+- `scripts/universal-dump.py` — triage orchestrator. Identifies files by
+  content, extracts strings and network indicators with provenance,
+  delegates to external tools, and ranks next steps from observed evidence.
+  Deliberately does not reimplement Ghidra, radare2 or IL2CPP dumpers.
+- `scripts/dumpers/` — internal modules (`_`-prefixed, not CLI tools):
+  `_tools` (tool discovery), `_formats` (content-based identification,
+  entropy, unknown-classification), `_indicators` (IOCs with provenance),
+  `_binaries` (ELF/PE/Mach-O triage), `_android` (APK/AAB, binary XML),
+  `_unity` (Unity/IL2CPP detection and metadata probing), `_archives`,
+  `_assets`, `_report` (report rendering and next-step ranking).
+- `scripts/dump-diff.py` — compares two `universal-dump.py` reports across
+  files, indicators, binaries, Android manifest and Unity state, emitting
+  hypotheses each with the test that would confirm it.
+- `examples/universal-dump.md` — triage workflow and reading its ranking.
+- `examples/analyze-android-apk.md` — APK triage, manifest, JNI bridge.
+- `examples/analyze-unity-il2cpp.md` — Unity/IL2CPP detection, metadata
+  probing, and the obfuscated-metadata case.
+- `examples/compare-binaries.md` — artefact diff vs behavioural diff.
+
+**Long-running investigation state**
+- `references/investigation-state.md` — how to keep state so refuted and
+  blocked hypotheses are not re-tested.
+- `templates/project-state/` — `dead-ends.md`, `known-formats.md`,
+  `known-offsets.md`, `known-protocols.md`, `hypotheses.md`.
+
+### Changed
+
+- `SKILL.md` — widened to cover binary, mobile, Unity/IL2CPP, web and protocol
+  reverse engineering; added a "choosing where to start" table and the
+  observed/inferred/confirmed labelling used throughout.
+- `README.md` — new capability matrix, script overview, output layout,
+  templates, and an explicit statement that the scripts require no network.
+- `selftest.py` — expanded from 60 to 195 checks, now covering content-based
+  identification, indicator provenance, Android binary XML, APK analysis,
+  IL2CPP metadata probing, archives, binary triage, web technology evidence,
+  request diffing and redaction, robots/sitemap parsing, JavaScript
+  extraction, report ranking and tool discovery.
+
+### Fixed
+
+Bugs found while writing the new modules, in existing or new code:
+
+- `_android.py` read AXML chunk types as 16-bit when the layout packs them
+  differently, and read the start-element header as 56 bytes instead of 36,
+  which prevented any manifest from being decoded.
+- `_android.py` resolved typed attribute values from the wrong field, so
+  integer attributes such as `versionCode` decoded as `None`.
+- `_archives.extract_all` used a `while`/`else` in which the `else` could
+  never run, so no zip member was ever counted as extracted.
+- `_indicators.API_PATH_RE` required a path segment after the prefix, so
+  `/api` alone was not captured.
+- `_weblib.parse_robots` mishandled user-agent grouping and returned rule
+  counts that did not reflect the parsed directives.
+- `_weblib` JavaScript extraction looked for feature flags and endpoint names
+  only inside quoted strings, missing bare identifiers.
+- `_tools.tool_version` accepted an argument-parsing complaint as a version
+  string (unzip answering `--version` with usage output).
+
+### Notes
+
+- `universal-dump.py` identifies files by content first and treats the
+  extension as corroboration; a disagreement is reported.
+- High entropy alone never produces an "encrypted" claim; `classify_blob`
+  requires compound conditions and always returns a confidence.
+- Indicators carry `source` and `offset`; the offset is `null` when it cannot
+  be determined rather than being invented.
+- IL2CPP metadata that does not parse is reported as
+  `status: obfuscated_or_custom` with a confidence, never as "broken".
+- Technology fingerprints distinguish structural evidence from
+  self-declaration, and self-declarations always carry a caveat.
+- All documented tool behaviour was verified against real binaries or
+  generated fixtures, not assumed.
+
 ## [1.0.0] — 2026-10-06
 
 Initial release.
@@ -16,14 +110,11 @@ Initial release.
 **Methodology**
 - Evidence-first investigation loop: observation → hypothesis → test →
   confirm/refute → document.
-- Five confidence levels (`very low` through `very high`) with a required
-  justification for each assignment.
-- Explicit `unknown` / `insufficient evidence` as legitimate conclusions.
+- Five confidence levels with a required justification for each assignment.
+- `unknown` and `insufficient evidence` as legitimate conclusions.
 - Reporting template separating observed evidence from interpretation.
-- Reproducibility requirements: file hash, tool version, exact command,
-  load base, test conditions, observed result.
-- Naming rules that forbid claims stronger than the supporting evidence.
-- Structure-reconstruction rules that keep unknown fields unknown.
+- Reproducibility requirements: hash, tool version, command, load base.
+- Naming rules forbidding claims stronger than the supporting evidence.
 
 **Knowledge references** (18 files, loaded on demand)
 - `methodology.md`, `tooling.md`
@@ -33,20 +124,11 @@ Initial release.
 - Dynamic: `dynamic-analysis.md`, `frida.md`, `gdb.md`, `lldb.md`
 - Analysis: `binary-diff.md`, `protocols.md`
 
-**Scripts** (Python 3 standard library only, no dependencies)
-- `elf-summary.py` — format, architecture, layout, dependencies and symbol
-  counts for ELF, PE and Mach-O; container summary for APKs.
-- `strings-map.py` — string extraction with addresses; pointer and
-  instruction-level cross-reference resolution.
-- `find-xrefs.py` — references to an address, symbol or string, mapped to
-  containing functions.
-- `compare-symbols.py` — symbol, import and export diffs between two builds,
-  with optional rename candidates.
-- `function-signatures.py` — probable signatures inferred from register usage;
-  output is labelled as inference.
-- `selftest.py` — 60 assertions covering ELF (32/64-bit, little/big-endian),
-  PE32+ and Mach-O, using generated fixtures with known contents.
-- `_binlib.py` — dependency-free format parsers shared by the scripts.
+**Scripts** (Python 3 standard library only)
+- `elf-summary.py`, `strings-map.py`, `find-xrefs.py`,
+  `compare-symbols.py`, `function-signatures.py`
+- `selftest.py`: 60 assertions over generated ELF/PE/Mach-O fixtures
+- `_binlib.py`: dependency-free ELF/PE/Mach-O parsers
 
 **Worked examples**
 - `analyze-binary.md`, `analyze-library.md`, `trace-function.md`,
@@ -54,9 +136,7 @@ Initial release.
 
 ### Notes
 
-- Every documented command was verified against a real binary; documented
-  tool behaviour (interpreter paths, `.eh_frame` surviving stripping, ADRP/ADD
-  pairing) is confirmed rather than assumed.
+- Every documented command was verified against a real binary.
 - AArch64 `adrp`/`add` pairs are recombined when resolving references, and
   register-overwrite tracking prevents false pairings.
 - Scripts report missing external tools explicitly instead of returning
