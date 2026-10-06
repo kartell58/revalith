@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "category": "systems",
+  "kind": "system",
+  "description": "Groups of functions forming a subsystem.",
+  "count": 1,
+  "entries": [
+    {
+      "name": "<subsystem>",
+      "kind": "system",
+      "status": "unknown",
+      "evidence": [
+        "EXAMPLE, replace: 12 functions share one vtable and one 16-byte state block"
+      ],
+      "hypothesis": "EXAMPLE: a coherent subsystem rather than a coincidence of adjacency in the binary",
+      "confidence": "very low",
+      "confidence_basis": "sharing a data block is suggestive; adjacency in a binary is weak evidence, because the linker decides that",
+      "next_test": "confirm the grouping with a call trace: do these functions call each other in one phase of the frame?",
+      "notes": "Grouping by name similarity alone is not evidence."
+    }
+  ]
+}

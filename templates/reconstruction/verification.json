@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "category": "verification",
+  "kind": "verification",
+  "description": "Tests run and what each one showed.",
+  "count": 1,
+  "entries": [
+    {
+      "name": "EXAMPLE: <what was tested>",
+      "kind": "verification",
+      "status": "observed",
+      "evidence": [
+        "EXAMPLE, replace: original and reimplementation run with the same input for 60 frames"
+      ],
+      "tests": [
+        "EXAMPLE: compared position.y at every frame -- agrees for 58, diverges at frame 59 by exactly 1"
+      ],
+      "observed_behavior": "EXAMPLE: divergence appears only when velocity.y is negative, which the trace shows at frame 59",
+      "confidence": "medium",
+      "confidence_basis": "the divergence is observed and its condition is correlated; the mechanism is not yet established",
+      "notes": "Record the test and what it showed, not just that it passed."
+    }
+  ]
+}

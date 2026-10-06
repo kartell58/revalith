@@ -61,6 +61,7 @@ def new_report(target: str, tool_report=None) -> Dict:
         },
         "notable": [],
         "next_steps": [],
+        "reconstruction_candidates": [],
         "warnings": [],
         "errors": [],
         "coverage": {
@@ -228,6 +229,169 @@ def next_steps(report: Dict, max_items: int = 25) -> List[Dict]:
 
 def build_priorities(report: Dict) -> None:
     report["next_steps"] = next_steps(report)
+    report["reconstruction_candidates"] = reconstruction_candidates(report)
+
+
+def reconstruction_candidates(report: Dict, max_items: int = 20) -> List[Dict]:
+    """Rank targets by how much a reconstruction of them would explain.
+
+    The difference from :func:`next_steps` is the question being asked. That
+    function asks "what should I look at first"; this one asks "what should I
+    reconstruct first", which favours large binaries, central data files and
+    anything another artefact depends on -- and disfavours what is merely
+    interesting to read.
+
+    A candidate is only listed when an observation supports it. A file with no
+    observations is not a reconstruction candidate, however suspicious it
+    looks, because ranking it would be a guess wearing a priority.
+    """
+    items: List[Dict] = []
+
+    def add(target: str, kind: str, reasons: List[str], priority: str,
+            action: str, size=None):
+        if not reasons:
+            return
+        items.append({
+            "target": target, "kind": kind, "priority": priority,
+            "reasons": reasons, "reason": "; ".join(reasons),
+            "suggested_action": action, "size": size,
+        })
+
+    # -- binaries: the executable bodies a reimplementation must replace --
+    for b in report.get("binaries", []):
+        if not b.get("analysed"):
+            continue
+        reasons: List[str] = []
+        size = b.get("size")
+        if b.get("entrypoint"):
+            reasons.append("has an entry point: this is program logic, not "
+                           "just a library")
+        if b.get("elf_type") == "EXEC" or b.get("format") == "PE":
+            pass
+        counts = b.get("counts") or {}
+        funcs = counts.get("functions") or 0
+        if funcs:
+            reasons.append(f"{funcs} function(s) to reconstruct")
+        if b.get("stripped"):
+            reasons.append("stripped: names must be recovered, so a "
+                           "reimplementation has more to re-derive")
+        if b.get("jni_export_count"):
+            reasons.append(f"{b['jni_export_count']} JNI export(s) define a "
+                           f"reconstruction boundary with the Java layer")
+        if b.get("interpreter"):
+            reasons.append("executable with a PT_INTERP: it can be run, so "
+                           "differential testing is available")
+        size_mb = (size or 0) / (1024 * 1024)
+        if size_mb >= 1:
+            reasons.append(f"{size_mb:.1f} MiB: a substantial share of the "
+                           f"behaviour lives here")
+        if reasons:
+            prio = "high" if (b.get("entrypoint") and size_mb >= 1) else \
+                ("medium" if reasons else "low")
+            add(b["path"], "binary", reasons, prio,
+                "record each understood function in the ledger "
+                "(recon-ledger.py); a reimplementation follows the ledger",
+                size=size)
+
+    # -- android: the layer a native reimplementation must interoperate with
+    android = report.get("android")
+    if android and not android.get("error"):
+        reasons = []
+        dex = android.get("dex_files") or []
+        if dex:
+            reasons.append(f"{len(dex)} DEX file(s): the managed layer defines "
+                           f"the entry points")
+        nl = android.get("native_libraries") or []
+        if nl:
+            reasons.append(f"{len(nl)} native librar"
+                           f"{'y' if len(nl) == 1 else 'ies'}: the boundary "
+                           f"between the two layers")
+        m = android.get("manifest") or {}
+        if m.get("activities"):
+            reasons.append(f"{len(m['activities'])} declared activities: "
+                           f"the reconstruction's surface")
+        if reasons:
+            add(android["path"], "android", reasons, "high",
+                "reconstruct the JNI boundary before either side: it is the "
+                "contract both implementations must satisfy")
+
+    # -- unity / il2cpp: naming is the bottleneck, and it is recoverable --
+    unity = report.get("unity") or {}
+    if unity.get("il2cpp"):
+        reasons = list(unity.get("evidence") or [])
+        meta = unity.get("metadata") or {}
+        if meta.get("detected"):
+            reasons.append(f"metadata present ({meta.get('size')} bytes): "
+                           f"method and field names are recoverable from it")
+        if meta.get("standard_magic"):
+            reasons.append("standard metadata header: a dumper is likely to "
+                           "work, which makes name recovery mechanical")
+        if reasons:
+            add("unity/il2cpp", "managed-runtime", reasons, "high",
+                "run a dumper on the metadata and enter the recovered names "
+                "into the ledger; do not reverse the stripped runtime by hand")
+
+    # -- data files: reconstruction targets that are not code at all -------
+    summary = report.get("files", {}).get("summary", {})
+    structured = []
+    for rec in report.get("files", {}).get("catalogue", []):
+        fmt = rec.get("format")
+        if fmt in ("zip", "gzip", "xz", "bzip2", "7z", "rar", "tar",
+                   "cab", "lzma"):
+            continue          # containers are listed separately
+        size = rec.get("size") or 0
+        if fmt in ("dex", "sqlite", "wasm", "unity-assetbundle", "elf", "pe",
+                   "macho", "macho-fat"):
+            continue          # already covered above
+        if fmt in ("text", "json", "xml", "javascript", "html", "config"):
+            # A configuration file is a reconstruction target when something
+            # else depends on it, which the indicator scan cannot show. Listed
+            # low, and only when it is large enough to carry structure.
+            if size >= 64 * 1024:
+                structured.append((rec.get("path"), fmt, size,
+                                   "large text or configuration file: it may "
+                                   "encode a format rather than be one"))
+        elif fmt == "unknown" and size >= 32 * 1024:
+            structured.append((rec.get("path"), fmt, size,
+                               "unidentified and substantial: a format to "
+                               "decode before it can be reimplemented"))
+    for path, fmt, size, why in sorted(structured, key=lambda x: -(x[2] or 0)):
+        prio = "high" if (fmt == "unknown" and size >= 256 * 1024) else "low"
+        add(path, "data", [why], prio,
+            "identify the format by content (magic, structure, entropy) "
+            "before assuming what it holds")
+
+    # -- archives: containers whose contents are the real targets ---------
+    for arc in report.get("archives", []):
+        interesting = arc.get("interesting") or {}
+        if not interesting:
+            continue
+        members = sum(len(v) for v in interesting.values())
+        reasons = [f"contains {members} member(s) across "
+                   f"{len(interesting)} notable categories"]
+        if "unity" in interesting:
+            reasons.append("contains Unity or IL2CPP data")
+        if "dex" in interesting:
+            reasons.append("contains DEX files")
+        add(arc["path"], "archive", reasons, "medium",
+            "extract and re-run this dump on the extracted tree; the members "
+            "are the actual reconstruction targets")
+
+    # -- indicators: the interface a reimplementation must satisfy --------
+    counts = (report.get("indicators", {}).get("summary", {}).get("counts")
+              or {})
+    if counts.get("url") or counts.get("domain"):
+        reasons = [f"{counts.get('url', 0)} URL(s), "
+                   f"{counts.get('domain', 0)} domain(s)"]
+        if counts.get("api_path"):
+            reasons.append(f"{counts['api_path']} API path(s)")
+        add("network interface", "interface", reasons, "medium",
+            "an independent implementation must satisfy this interface; "
+            "verify it against the original rather than against the strings")
+
+    order = {"high": 0, "medium": 1, "low": 2}
+    items.sort(key=lambda i: (order.get(i["priority"], 9), i["target"]))
+    return items[:max_items]
 
 
 # ------------------------------------------------------------------- output
@@ -462,6 +626,22 @@ def render_text(report: Dict) -> str:
         add(f"      reason : {s['reason']}")
         add(f"      action : {s['suggested_action']}")
     add("")
+
+    recon = report.get("reconstruction_candidates") or []
+    if recon:
+        add("-" * 74)
+        add("RECONSTRUCTION CANDIDATES  (what to rebuild, not what to read)")
+        add("-" * 74)
+        for i, r in enumerate(recon, 1):
+            add(f"  {i}. [{r['priority'].upper()}] {r['target']}  ({r['kind']})")
+            for reason in r["reasons"]:
+                add(f"      because : {reason}")
+            add(f"      next    : {r['suggested_action']}")
+        add("")
+        add("  A candidate here means a reconstruction of it would explain a")
+        add("  large share of the observed behaviour. It is a starting point,")
+        add("  not a scope estimate.")
+        add("")
 
     cov = report.get("coverage", {})
     add("-" * 74)

@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "category": "formats",
+  "kind": "format",
+  "description": "Asset and file formats, decoded.",
+  "count": 1,
+  "entries": [
+    {
+      "name": "<asset format>",
+      "kind": "format",
+      "status": "unknown",
+      "evidence": [
+        "EXAMPLE, replace: 4096-byte header, then fixed 12-byte records"
+      ],
+      "confidence": "very low",
+      "confidence_basis": "a regular structure is visible; its meaning is not",
+      "next_test": "decode the first record and check whether the values are plausible when interpreted the proposed way",
+      "notes": "A repeating record size is a structure, not yet a format."
+    }
+  ]
+}

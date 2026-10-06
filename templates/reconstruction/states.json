@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "category": "states",
+  "kind": "state",
+  "description": "States, state machines and observable transitions.",
+  "count": 1,
+  "entries": [
+    {
+      "name": "entity_mode",
+      "kind": "state",
+      "status": "observed",
+      "evidence": [
+        "EXAMPLE, replace: the byte at +0x0c takes values 0..3",
+        "EXAMPLE: observed 0 and 1 only during the traced run",
+        "EXAMPLE: value 0 and value 1 lead to different +0x10 writes"
+      ],
+      "observed_behavior": "EXAMPLE: a 2-bit field that gates how +0x10 is computed",
+      "confidence": "medium",
+      "confidence_basis": "the values and their effect are observed; the vocabulary is not. This is not yet a state machine.",
+      "next_test": "drive the entity into each value and record the transition that produced it",
+      "notes": "Do not name the values until a transition distinguishes them."
+    }
+  ]
+}

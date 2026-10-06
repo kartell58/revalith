@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "category": "hypotheses",
+  "kind": "hypothesis",
+  "description": "Open claims, each with a next test.",
+  "count": 1,
+  "entries": [
+    {
+      "name": "EXAMPLE: <the claim>",
+      "kind": "hypothesis",
+      "status": "hypothesized",
+      "evidence": [
+        "EXAMPLE, replace: raw 0x0180 with a scale of 256 is consistent with a stored 1.5",
+        "EXAMPLE: two other live values read as sensible 16.16 fixed-point numbers under the same interpretation"
+      ],
+      "hypothesis": "EXAMPLE: the field is 16.16 fixed-point",
+      "confidence": "low",
+      "confidence_basis": "consistent with two observations and not established by any; an integer scale is the most common way to store a fraction and its prevalence is not evidence here",
+      "next_test": "find a field that is written from a computed fraction and read it both ways; the interpretations predict different values"
+    }
+  ]
+}

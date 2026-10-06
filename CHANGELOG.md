@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Versions are for the skill, not for a target being analysed.
 
+## [3.0.0] — 2026-10-06
+
+Software reconstruction added as a first-class capability, taking the skill
+from understanding compiled software to reimplementing it.
+
+### Added
+
+**Reconstruction methodology**
+- `references/reconstruction.md` — the ladder
+  (analysis → understanding → reconstruction → reimplementation → verification
+  → porting), the difference from decompilation, the iterative loop, the four
+  fidelity goals, and what cannot be reconstructed.
+- `references/semantic-modeling.md` — evidence to a named model: the graded
+  naming rule, structure and bitfield recovery from access evidence, enums,
+  subsystem grouping with the evidence that does not establish a group, and
+  invariants.
+- `references/behavioral-analysis.md` — a model independent of the
+  original's implementation: entities, state machines, guards, timing, assets
+  and I/O as behaviour.
+- `references/differential-testing.md` — determinism, what to compare, locating
+  the first divergence, explaining it, fixed-point and numeric reconstruction,
+  and what a passing test does not prove.
+- `references/reimplementation.md` — model to code, language selection, build
+  reconstruction, porting, and declaring what was not implemented.
+
+**The reconstruction ledger**
+- `scripts/_reconlib.py` — status and confidence vocabulary, entry validation,
+  ledger storage with an audit trail, trace parsing, first-divergence
+  location, observable-state diffing, and numeric cause hypotheses.
+- `scripts/recon-ledger.py` — `init`, `add`, `update`, `list`, `show`,
+  `validate`, `stats`. The validator refuses `verified` without a recorded
+  test, refuses a confidence above what the status justifies, and refuses a
+  `hypothesized` entry with neither a test nor a `next_test`.
+- `templates/reconstruction/` — eight ledgers (architecture, functions,
+  structures, states, systems, formats, hypotheses, verification) plus the
+  schema document they follow.
+
+**Differential tooling**
+- `scripts/state-diff.py` — compare observable state, locate the first
+  divergent frame with `--all-elements`, and report candidate causes for a
+  numeric divergence with the test that would settle each. Causes are never
+  presented as fixes.
+- `scripts/trace-diff.py` — locate the first divergence between two call
+  traces, distinguishing a different event from the same event with different
+  arguments, and treating a shorter trace as a termination difference.
+
+**Universal dump integration**
+- `universal-dump.py` now emits `reconstruction_candidates` in `report.json`
+  and `report.txt`, ranked from the same observations as `next_steps` but for a
+  different question: what is worth rebuilding, rather than what is worth
+  reading.
+
+**Examples**
+- `reconstruct-function.md`, `reconstruct-structure.md`,
+  `reconstruct-state-machine.md`, `reconstruct-protocol.md`,
+  `reconstruct-legacy-game.md`, `differential-testing.md`,
+  `reimplement-subsystem.md`.
+
+### Changed
+
+- `SKILL.md` — the ladder, a table for recognising which phase a request is
+  in, the reconstruction scripts, and what reconstruction cannot deliver.
+- `README.md` — reconstruction described as a second capability, with the
+  ledger and the differential tools.
+- `selftest.py` — expanded from 195 to 283 checks, covering ledger validation,
+  the load-bearing-assumption query, ledger round-trips, the shipped
+  templates, trace parsing and first divergence, state diffing, numeric cause
+  hypotheses, and reconstruction candidate ranking.
+
+### Notes
+
+- Reconstruction is presented as distinct from decompilation throughout: a
+  decompiler produces source-like text, reconstruction produces a model where
+  every claim is refutable.
+- A numeric divergence is reported with candidate causes and the test that
+  would settle each. The tools never suggest an edit, because a constant that
+  makes one frame agree is not evidence about the next.
+- Traces compare labels *and arguments* by default. Matching calls with
+  different arguments is not agreement, and reporting it as such would be a
+  false all-clear.
+- Every example marks its target data as synthetic. No example presents
+  invented results as observations of a real target.
+
 ## [2.0.0] — 2026-10-06
 
 Web reverse engineering and automated triage added as first-class areas.

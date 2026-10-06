@@ -64,6 +64,22 @@ New capabilities in `universal-dump.py` go in `scripts/dumpers/` as a
 A module that reaches the network does not belong here. `web-enum.py` owns
 that, and it must stay opt-in.
 
+### Adding reconstruction functionality
+
+Reconstruction logic goes in `scripts/_reconlib.py`; the CLIs
+(`recon-ledger.py`, `state-diff.py`, `trace-diff.py`) stay thin. If a change
+alters what the ledger accepts, it must also add a `selftest.py` case that
+demonstrates the rejection — the value of the validator is entirely in the
+things it refuses.
+
+Two rules specific to this area:
+
+- **Never suggest a fix for a divergence.** Report the candidate causes and
+  the test that would settle each. A tool that recommends `round()` instead of
+  truncation because the output matched is worse than no tool.
+- **A status change must be recorded, not overwritten.** `Ledger.update`
+  appends to `history` so a superseded claim stays visible. Do not clear it.
+
 Style: readable over clever, comments explaining *why* rather than *what*, and
 no silent fallbacks — if something cannot be determined, report that.
 

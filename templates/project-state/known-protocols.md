@@ -3,6 +3,11 @@
 Protocol and message formats recovered from this target: framing, fields,
 state machines, checksums.
 
+> If you intend to **implement** a client or server for one of these
+> protocols, the reconstruction ledger is the better tool: it records the state
+> machine, the message model and the verification tests as testable entries.
+> See `templates/reconstruction/` and `references/reconstruction.md`.
+
 Field states are load-bearing. Use exactly one:
 
 | State | Meaning |

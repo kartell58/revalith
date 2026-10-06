@@ -462,6 +462,7 @@ import _binaries     # noqa: E402
 import _report       # noqa: E402
 import _tools        # noqa: E402
 import _weblib       # noqa: E402
+import _reconlib     # noqa: E402
 
 
 def test_formats_identify_by_content(tmp):
@@ -836,13 +837,381 @@ def test_tools_discovery_never_fails():
     eq(r["error"], "not_found", "missing tool reports not_found")
 
 
+# --------------------------------------------------------------------------
+# Reconstruction
+# --------------------------------------------------------------------------
+
+def test_recon_validation_rejects_overreach():
+    """The ledger must refuse a claim its own evidence does not support.
+
+    This is the mechanism that stops a hypothesis becoming a fact. Each case
+    below is a way that has actually happened.
+    """
+    # verified with no test: the central failure this guards against.
+    p = _reconlib.validate_entry({"name": "x", "kind": "function",
+                                 "status": "verified", "evidence": ["e"],
+                                 "confidence": "very high"})
+    check(any("requires at least one test" in x for x in p),
+          "verified without a test is rejected")
+
+    # observed with no evidence at all.
+    p = _reconlib.validate_entry({"name": "x", "kind": "function",
+                                 "status": "observed"})
+    check(any("no evidence" in x for x in p),
+          "a status claiming behaviour needs evidence")
+
+    # confidence above what the status can justify.
+    p = _reconlib.validate_entry({"name": "x", "kind": "function",
+                                 "status": "observed", "evidence": ["e"],
+                                 "confidence": "very high"})
+    check(any("exceeds what status" in x for x in p),
+          "confidence may not exceed what the status justifies")
+
+    # hypothesized with nothing to act on.
+    p = _reconlib.validate_entry({"name": "x", "kind": "function",
+                                 "status": "hypothesized", "evidence": ["e"]})
+    check(any("next_test" in x for x in p),
+          "a hypothesis with no test and no next_test is rejected")
+
+    # refuted without a record of why: the entry gets re-tested later.
+    p = _reconlib.validate_entry({"name": "x", "kind": "hypothesis",
+                                 "status": "refuted"})
+    check(any("refuted" in x for x in p),
+          "refuted without a record is rejected")
+
+    # bad vocabulary.
+    p = _reconlib.validate_entry({"name": "x", "kind": "function",
+                                 "status": "probably-fine"})
+    check(any("is not one of" in x for x in p), "unknown status is rejected")
+    p = _reconlib.validate_entry({"name": "x", "kind": "function",
+                                 "status": "observed", "evidence": ["e"],
+                                 "confidence": "certain"})
+    check(any("confidence" in x for x in p), "unknown confidence is rejected")
+
+    # kind must match the ledger it lives in.
+    p = _reconlib.validate_entry({"name": "x", "kind": "state",
+                                 "status": "unknown"}, kind="function")
+    check(any("does not match" in x for x in p),
+          "an entry of the wrong kind is rejected")
+
+    # A well-formed entry passes cleanly.
+    good = _reconlib.new_entry(
+        name="0x8120", kind="function", status="verified",
+        confidence="high", evidence=["traced over 60 frames"],
+        tests=["compared writes at +0x08/+0x0c/+0x10 across frames"],
+        hypothesis="per-frame state update")
+    eq(_reconlib.validate_entry(good, "function"), [],
+       "a complete, tested entry validates cleanly")
+
+    # next_test alone satisfies "hypothesized" without claiming a test ran.
+    hyp = _reconlib.new_entry(
+        name="0x9000", kind="function", status="hypothesized",
+        evidence=["e"], hypothesis="h",
+        next_test="trace the writes over two frames")
+    eq(_reconlib.validate_entry(hyp, "function"), [],
+       "next_test is enough for a hypothesis")
+
+
+def test_recon_facts_vs_hypotheses():
+    # 0x8120 is a hypothesis that three other entries build on, which is
+    # exactly the situation the query exists to surface.
+    entries = [
+        {"name": "entity_state", "status": "partially-reconstructed"},
+        {"name": "physics_system", "status": "reconstructed",
+         "related_functions": ["0x8120"]},
+        {"name": "collision_system", "status": "hypothesized",
+         "related_functions": ["0x8120"]},
+        {"name": "0x8120", "status": "hypothesized", "evidence": ["e"]},
+        {"name": "h_fixed", "status": "refuted", "refuted_by": "float32"},
+    ]
+    fv = _reconlib.facts_vs_hypotheses(entries)
+    eq(fv["counts"]["established"], 2, "two entries counted as established")
+    eq(fv["counts"]["assumed"], 2, "two entries counted as assumed")
+    eq(fv["counts"]["refuted"], 1, "one entry counted as refuted")
+
+    names = [x["name"] for x in fv["load_bearing_assumptions"]]
+    check("0x8120" in names,
+          "an assumption that others depend on is flagged as load-bearing")
+    eq(fv["load_bearing_assumptions"][0]["referenced_by_count"], 2,
+       "the number of dependent entries is reported")
+    check("risk" in fv["load_bearing_assumptions"][0],
+          "the risk is explained, not merely flagged")
+    check("entity_state" not in names,
+          "an established entry is not reported as an assumption")
+    check("h_fixed" not in names,
+          "a refuted entry is not reported as an assumption")
+
+    # An entry nobody references is not load-bearing, however uncertain.
+    solo = _reconlib.facts_vs_hypotheses(
+        [{"name": "lonely", "status": "hypothesized"}])
+    eq(solo["load_bearing_assumptions"], [],
+       "an unreferenced assumption is not load-bearing")
+
+    # Self-reference must not make an entry load-bearing by definition.
+    selfref = _reconlib.facts_vs_hypotheses(
+        [{"name": "a", "status": "hypothesized", "related_functions": ["a"]}])
+    eq(selfref["load_bearing_assumptions"], [],
+       "a self-reference does not count as a dependent")
+
+
+def test_recon_ledger_roundtrip(tmp):
+    root = os.path.join(tmp, "recon")
+    led = _reconlib.Ledger(root)
+    check(not led.exists(), "a fresh path has no ledger yet")
+    check(len(led.missing()) == len(_reconlib.LEDGER_KINDS),
+          "every category is reported missing before init")
+
+    for cat in _reconlib.LEDGER_KINDS:
+        os.makedirs(root, exist_ok=True)
+        led.write(cat, [])
+    check(led.exists(), "all ledgers present after writing each")
+
+    e = _reconlib.new_entry("0x8120", "function", status="hypothesized",
+                            evidence=["called once per frame"],
+                            hypothesis="per-frame update",
+                            next_test="trace writes")
+    led.add("functions", e)
+    got = led.read("functions")
+    eq(len(got), 1, "entry added")
+    eq(got[0]["name"], "0x8120", "entry name round-trips")
+
+    # A duplicate name must be refused: two entries with one name make the
+    # cross-references ambiguous.
+    try:
+        led.add("functions", dict(e))
+        check(False, "adding a duplicate name should raise")
+    except _reconlib.LedgerError:
+        check(True, "adding a duplicate name is refused")
+
+    # A status change is recorded in history.
+    updated, problems = led.update(
+        "functions", "0x8120",
+        {"status": "reconstructed", "confidence": "high",
+         "tests": ["traced 60 frames"]})
+    eq(updated["status"], "reconstructed", "status updated")
+    hist = updated.get("history")
+    check(hist, "the change is recorded in history")
+    check(isinstance(hist, list) and hist and "changes" in hist[0],
+          "history records what changed, not merely that something did")
+    eq(problems, [], "the updated entry validates")
+
+    rep = led.validate()
+    check(rep["ok"], f"a clean ledger validates: {rep['problems']}")
+    eq(rep["checked"], 1, "one entry checked")
+
+    # An unknown category is an error, not a silent empty list.
+    try:
+        led.read("not-a-category")
+        check(False, "unknown category should raise")
+    except _reconlib.LedgerError:
+        check(True, "unknown ledger category is refused")
+
+
+def test_recon_ledger_validates_seed_templates():
+    """The shipped templates must satisfy the validator, or every user's
+    first ledger starts with eight reported problems."""
+    tpl = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "..", "templates", "reconstruction")
+    if not os.path.isdir(tpl):
+        check(False, "templates/reconstruction/ is missing")
+        return
+    led = _reconlib.Ledger(tpl)
+    rep = led.validate()
+    check(rep["ok"],
+          f"shipped templates validate: {rep['problems']}")
+    check(rep["checked"] >= len(_reconlib.LEDGER_KINDS),
+          "every template category carries a worked example")
+
+
+def test_recon_trace_first_divergence():
+    a = _reconlib.parse_trace("A\nB\nC\nD\nF\n")
+    b = _reconlib.parse_trace("A\nB\nC\nE\nF\n")
+    d = _reconlib.first_divergence(a, b)
+    eq(d["identical"], False, "traces differ")
+    eq(d["common_prefix_length"], 3, "three events agree")
+    eq(d["first_divergence_index"], 3, "divergence located at the 4th event")
+    eq(d["divergence"]["side_a"]["label"], "D", "side A event reported")
+    eq(d["divergence"]["side_b"]["label"], "E", "side B event reported")
+    eq(d["kind"], "label", "a different event is a label divergence")
+
+    # Identical traces.
+    d2 = _reconlib.first_divergence(a, a)
+    eq(d2["identical"], True, "identical traces reported identical")
+    eq(d2["first_divergence_index"], None, "no divergence index when identical")
+    check(d2.get("note"), "an identical result states what it does not cover")
+
+    # Comments and blank lines are not events.
+    c = _reconlib.parse_trace("# a comment\nA\n\nB\n")
+    eq(len(c), 2, "comments and blank lines are skipped")
+
+    # JSON traces, and a value difference must not read as agreement.
+    ja = _reconlib.parse_trace('[{"event":"connect","value":1},'
+                               '{"event":"send","value":2}]')
+    jb = _reconlib.parse_trace('[{"event":"connect","value":"1"},'
+                               '{"event":"send","value":2}]')
+    d3 = _reconlib.first_divergence(ja, jb)
+    eq(d3["identical"], False,
+       "a type difference in an argument is not agreement")
+    eq(d3["kind"], "detail", "same event with different data is a detail "
+                             "divergence")
+
+    # --labels-only explicitly declines to compare arguments.
+    d4 = _reconlib.first_divergence(ja, jb, labels_only=True)
+    eq(d4["identical"], True, "labels-only comparison ignores the value")
+
+    # Truncation is distinguished from a behavioural divergence.
+    short = _reconlib.parse_trace("A\nB\n")
+    d5 = _reconlib.first_divergence(short, a)
+    eq(d5["kind"], "truncation", "a shorter trace is reported as truncation")
+    check("termination" in d5["divergence"]["explanation"],
+          "truncation is explained as termination, not behaviour")
+
+
+def test_recon_state_diff():
+    a = {"frame": 1832, "position": {"x": 512, "y": 104},
+         "velocity": {"x": 0, "y": 2}, "state": "FALLING"}
+    b = {"frame": 1832, "position": {"x": 512, "y": 103},
+         "velocity": {"x": 0, "y": 2}, "state": "FALLING"}
+    d = _reconlib.diff_observations(a, b)
+    eq(d["identical"], False, "state differs")
+    eq(d["divergent_fields"], 1, "exactly one field diverges")
+    f = d["fields"][0]
+    eq(f["field"], "position.y", "the nested field path is reported")
+    eq(f["value_a"], 104, "original value")
+    eq(f["value_b"], 103, "reimplementation value")
+    eq(f["delta"], -1, "delta computed")
+    check(f.get("candidate_causes"), "a numeric divergence carries causes")
+
+    # A tolerance absorbs the difference, and says what it means.
+    d2 = _reconlib.diff_observations(a, b, tolerance=1.0)
+    eq(d2["identical"], True, "tolerance absorbs the difference")
+    check(d2["note"], "a tolerance result explains the tolerance's scope")
+
+    # Field presence is itself a divergence, not a silent absence.
+    c = dict(a); c["extra"] = True
+    d3 = _reconlib.diff_observations(a, c)
+    kinds = {f["field"]: f["kind"] for f in d3["fields"]}
+    eq(kinds.get("extra"), "only_in_b",
+       "a field only one side reports is a divergence")
+
+    # A type change is called out as such, because it usually explains more
+    # than the value difference it causes.
+    d4 = _reconlib.diff_observations({"hp": 100}, {"hp": "100"})
+    eq(d4["fields"][0]["kind"], "type", "a type change is reported as a type "
+                                        "divergence")
+
+    # Causes are candidates, never fixes.
+    for c in d["fields"][0].get("candidate_causes", []):
+        check("cause" in c, "each cause is labelled")
+        check("fix" not in str(c).lower() or "boundary" in str(c).lower(),
+              "a cause does not read as a suggested edit")
+
+    # first_only narrows the report.
+    d5 = _reconlib.diff_observations(a, b, first_only=True)
+    eq(len(d5["fields"]), 1, "first-only narrows to one field")
+    check("not necessarily the first to have occurred" in d5["note"],
+          "the note states that field order is not execution order")
+
+
+def test_recon_numeric_causes_are_hypotheses():
+    # An off-by-one is recognised as a boundary/rounding question.
+    causes = _reconlib.numeric_causes(104, 103, "position.y")
+    labels = [c.get("cause") for c in causes]
+    check(any("off-by-one" in str(x) for x in labels),
+          "an off-by-one is identified as a discrete step")
+
+    # A constant integer ratio is the signature of a unit difference.
+    causes = _reconlib.numeric_causes(256, 512, "pos")
+    check(any("ratio" in str(c.get("cause", "")) or "ratio" in
+              str(c.get("detail", "")) for c in causes),
+          "an integer ratio is flagged as a unit/scale signal")
+
+    # Non-numeric values produce no numeric causes rather than raising.
+    eq(_reconlib.numeric_causes("a", "b", "x"), [],
+       "non-numeric values produce no numeric causes")
+    eq(_reconlib.numeric_causes(1, 1, "x"), [],
+       "equal values produce no causes")
+
+
+def test_recon_flatten():
+    flat = _reconlib.flatten({"a": {"b": 1}, "c": [10, 20]})
+    eq(flat, {"a.b": 1, "c[0]": 10, "c[1]": 20},
+       "nested objects and arrays flatten to dotted paths")
+
+
+def test_reconstruction_candidates():
+    """The dump must rank reconstruction targets from evidence, and must
+    not invent candidates from thin air."""
+    rep = _report.new_report("x")
+
+    # An empty report yields no candidates, not a ranked list of nothing.
+    eq(_report.reconstruction_candidates(rep), [],
+       "no evidence means no reconstruction candidates")
+
+    rep["binaries"] = [{
+        "path": "libgame.so", "analysed": True, "format": "ELF",
+        "entrypoint": "0x2a4c0", "size": 20 * 1024 * 1024,
+        "stripped": True, "jni_export_count": 18,
+        "interpreter": "/lib/ld-linux.so.2",
+        "counts": {"functions": 812},
+    }]
+    cands = _report.reconstruction_candidates(rep)
+    eq(len(cands), 1, "one binary produces one candidate")
+    c = cands[0]
+    eq(c["target"], "libgame.so", "the binary is the candidate")
+    check(c["reasons"], "the candidate states its reasons")
+    check(c["suggested_action"], "the candidate states what to do next")
+    check("entry point" in c["reason"], "an entry point is noted as evidence")
+    check("812 function" in c["reason"], "the function count is cited")
+    check(c["priority"] in ("high", "medium", "low"),
+          "priority is a known level")
+
+    # A binary with no observations produces no candidate.
+    rep["binaries"] = [{"path": "libx.so", "analysed": True,
+                        "counts": {}}]
+    eq(_report.reconstruction_candidates(rep), [],
+       "a binary with nothing observed is not a reconstruction candidate")
+
+    # Network indicators are a reconstruction obligation.
+    rep = _report.new_report("x")
+    rep["indicators"] = {"summary": {"counts": {"url": 4, "domain": 2,
+                                                 "api_path": 9}}}
+    cands = _report.reconstruction_candidates(rep)
+    check(any(x["kind"] == "interface" for x in cands),
+          "the network interface is a reconstruction target")
+
+    # Large unidentified data is a format to decode.
+    rep = _report.new_report("x")
+    rep["files"] = {"catalogue": [
+        {"path": "assets/world.bin", "format": "unknown", "size": 900000},
+        {"path": "readme.txt", "format": "text", "size": 200},
+    ], "summary": {}}
+    cands = _report.reconstruction_candidates(rep)
+    names = [x["target"] for x in cands]
+    check("assets/world.bin" in names,
+          "a large unidentified file is a reconstruction candidate")
+    check("readme.txt" not in names,
+          "a small text file is not a reconstruction candidate")
+
+    # Everything ranked must carry a reason.
+    rep = _report.new_report("x")
+    rep["binaries"] = [{"path": "b.so", "analysed": True,
+                        "entrypoint": "0x1000", "size": 5 * 1024 * 1024,
+                        "counts": {"functions": 10}}]
+    rep["indicators"] = {"summary": {"counts": {"url": 1}}}
+    for c in _report.reconstruction_candidates(rep):
+        check(c["reason"], f"{c['target']} carries a reason")
+        check(c["suggested_action"], f"{c['target']} carries a next action")
+
+
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         for fn in (test_elf_64, test_elf_32_be, test_pe, test_macho,
                    test_sniff, test_formats_identify_by_content,
                    test_indicators, test_android_manifest_roundtrip,
                    test_android_apk, test_unity_detection, test_archives_zip,
-                   test_binaries_triage_notable):
+                   test_binaries_triage_notable,
+                   test_recon_ledger_roundtrip):
             try:
                 fn(tmp)
             except Exception:
@@ -852,6 +1221,14 @@ def main():
                    test_web_request_diff_redaction,
                    test_web_robots_and_sitemap, test_web_js_extraction,
                    test_report_next_steps_requires_evidence,
+                   test_recon_validation_rejects_overreach,
+                   test_recon_facts_vs_hypotheses,
+                   test_recon_ledger_validates_seed_templates,
+                   test_recon_trace_first_divergence,
+                   test_recon_numeric_causes_are_hypotheses,
+                   test_recon_flatten,
+                   test_recon_state_diff,
+                   test_reconstruction_candidates,
                    test_tools_discovery_never_fails):
             try:
                 fn()

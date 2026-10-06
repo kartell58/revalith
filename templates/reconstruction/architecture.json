@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "category": "architecture",
+  "kind": "architecture",
+  "description": "The target's shape: platform, subsystems, entry points.",
+  "count": 1,
+  "entries": [
+    {
+      "name": "<target>",
+      "kind": "architecture",
+      "status": "unknown",
+      "evidence": [
+        "EXAMPLE, replace: universal-dump.py report.json present",
+        "EXAMPLE: 1 ELF binary, 2 archives, 417 files"
+      ],
+      "hypothesis": "EXAMPLE: a 16-bit-era game, structurally",
+      "confidence": "very low",
+      "confidence_basis": "a single format identification and nothing else",
+      "next_test": "read the entry point and identify the calling convention",
+      "notes": "Replace this entry. It documents the schema; it says nothing about your target."
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0",
+  "category": "functions",
+  "kind": "function",
+  "description": "One entry per function whose behaviour is understood.",
+  "count": 1,
+  "entries": [
+    {
+      "name": "0x8120",
+      "kind": "function",
+      "status": "hypothesized",
+      "address": "0x8120",
+      "evidence": [
+        "EXAMPLE, replace: called once per frame from the main loop",
+        "EXAMPLE: receives a pointer that persists across frames",
+        "EXAMPLE: reads the words at +0x08 and +0x0c",
+        "EXAMPLE: writes the word at +0x10",
+        "EXAMPLE: calls a routine that also writes +0x08"
+      ],
+      "observed_behavior": "EXAMPLE: reads two values, calls one routine, writes one value",
+      "hypothesis": "EXAMPLE: per-frame update of a persistent entity state",
+      "confidence": "low",
+      "confidence_basis": "call frequency and access pattern are consistent with an update, but nothing shows what it computes",
+      "next_test": "trace the writes to +0x08/+0x0c/+0x10 across two consecutive frames and see whether they advance together",
+      "related_data": [
+        "entity_state"
+      ]
+    }
+  ]
+}

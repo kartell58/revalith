@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0",
+  "category": "structures",
+  "kind": "structure",
+  "description": "One entry per recovered data layout.",
+  "count": 1,
+  "entries": [
+    {
+      "name": "entity_state",
+      "kind": "structure",
+      "status": "partially-reconstructed",
+      "evidence": [
+        "EXAMPLE, replace: 16 bytes, passed by pointer to 0x8120",
+        "EXAMPLE: +0x08 and +0x0c are read before the write to +0x10",
+        "EXAMPLE: accessed as 32-bit, alignment 4",
+        "EXAMPLE: allocated once at init, never freed in the trace"
+      ],
+      "hypothesis": "EXAMPLE: an entity's position and velocity",
+      "confidence": "medium",
+      "confidence_basis": "layout and access widths are established; the field meanings are inferred from use, not from the writer",
+      "related_functions": [
+        "0x8120"
+      ],
+      "notes": "EXAMPLE: field semantics unconfirmed. See hypotheses.json."
+    }
+  ]
+}
