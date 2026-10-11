@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "category": "protocols",
+  "kind": "protocol",
+  "description": "Wire protocols: framing, fields, state machine, and what each costs.",
+  "count": 1,
+  "entries": [
+    {
+      "name": "EXAMPLE: <session control channel>",
+      "kind": "protocol",
+      "status": "observed",
+      "source": "protocol",
+      "evidence": [
+        "EXAMPLE, replace: 40 captured frames; every one starts with a length word at +0x00",
+        "EXAMPLE: the length at +0x00 equals the remaining frame size in all 40 frames",
+        "EXAMPLE: a type byte at +0x04 takes values 1, 2 and 7"
+      ],
+      "observed_behavior": "EXAMPLE: length-prefixed frames on one connection; the client sends type 2 and waits, the server answers with type 1",
+      "confidence": "medium",
+      "confidence_basis": "the framing is established across 40 frames; the meaning of type 2 is not",
+      "next_test": "drive the handshake twice and record which field decides the branch, or whether none does",
+      "notes": "EXAMPLE: a parser that has not run against real bytes is a hypothesis, not a protocol. Record the field order as observed, and mark each field's type separately from its meaning."
+    }
+  ]
+}

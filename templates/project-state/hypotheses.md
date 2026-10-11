@@ -1,5 +1,12 @@
 # Hypotheses
 
+> **Reference format, not the live copy.** The files here show what the
+> readable views look like. The working copies in an investigation are
+> generated from the ledger by `recon-ledger.py render`, which
+> overwrites them: edit `reconstruction/*.json`, then re-render.
+> A hand-edited copy and the ledger disagree silently, and the one that
+> is checked first is the one that was wrong.
+
 Live hypotheses with their status and next test. A hypothesis that has been
 refuted moves to `dead-ends.md`; it does not stay here in a stale state.
 

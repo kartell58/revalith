@@ -17,166 +17,229 @@ session 3: 30 minutes wasted on a settled question
 The waste compounds across a large target: hundreds of small refutations,
 each cheap individually, add up to a day of redundant work.
 
-## The state directory
+## One store, not two
 
-Copy the templates from `templates/project-state/` into the project being
-investigated:
+The state of an investigation lives in **the ledger**:
+
+```
+reconstruction/
+├── architecture.json   ├── formats.json      ├── verification.json
+├── functions.json      ├── protocols.json    └── dead_ends.json
+├── structures.json     ├── hypotheses.json
+├── states.json         └── systems.json
+```
+
+Ten JSON files, one per category, each entry carrying a status, its evidence,
+and the confidence the status can justify. `scripts/recon-ledger.py` maintains
+them and refuses entries that outrun their own evidence.
+
+The readable Markdown — `dead-ends.md`, `hypotheses.md`,
+`known-formats.md`, `known-offsets.md`, `known-protocols.md` — is **rendered
+from the ledger**:
 
 ```sh
-cp -r ~/.config/opencode/skills/revalith/templates/project-state/ \
-   ./project-state/
+scripts/recon-ledger.py render ./reconstruction -o ./project-state/
 ```
 
-| File | Holds |
-| --- | --- |
-| `dead-ends.md` | hypotheses already refuted, with what was tried |
-| `known-formats.md` | container and file formats already decoded |
-| `known-offsets.md` | structure offsets and their evidence |
-| `known-protocols.md` | protocol fields, framing, state machines |
-| `hypotheses.md` | live hypotheses, their status and next test |
+This is the part worth insisting on. Keeping the notes as a second,
+hand-maintained store does not work, and it fails in a specific way: a session
+reads the Markdown, decides something, writes the conclusion in the ledger,
+and does not update the notes. Both are correct on different days. The next
+session reads the notes, finds a stale answer, and acts on it. Nothing
+reports the disagreement, because there is nothing that could.
 
-These are working notes for the investigation, not deliverables. They exist to
-be read by the next session, including one that is not you.
+One store, or two that disagree. Generating the second from the first is the
+only version of "two" that survives a month.
 
-## dead-ends.md — the important one
+## Working with it
+
+```sh
+scripts/recon-ledger.py init ./reconstruction
+
+# record a hypothesis the day it is formed, before it is tested
+scripts/recon-ledger.py add ./reconstruction hypotheses "asset at 0x1a40" \
+    --status hypothesized --source static \
+    --evidence "4 KiB region, entropy 7.8, no known magic" \
+    --evidence "referenced by exactly one function, sub_4a2010" \
+    --hypothesis "encrypted with a key derived at runtime" \
+    --next-test "trace sub_4a2010 at startup and look for a key-sized write"
+
+# and the moment it is refuted -- as a dead end, not a deleted hypothesis
+scripts/recon-ledger.py add ./reconstruction dead_ends "LZ4 payload" \
+    --status refuted --source static \
+    --evidence "lz4 -d at 0x1a40 -> bad magic" \
+    --evidence "lz4.frame.decompress -> LZ4Error" \
+    --evidence "frame magic 0x184D2204 absent" \
+    --hypothesis "the asset payload is LZ4-compressed" \
+    --refuted-by "two decoders and the magic bytes all disagree" \
+    --avoid "measure entropy before choosing the next codec"
+
+# what is still open -- the question that picks the next hour of work
+scripts/recon-ledger.py gaps ./reconstruction
+```
+
+`--source` records which layer produced the evidence: `static`, `dynamic`,
+`runtime`, `dump`, `diff`, `asset`, `protocol`, `other`. It matters more than
+it looks. An entry whose source is unknown cannot be re-checked the way it was
+found, and a claim that rests on a watchpoint defended later as a static
+reading is how a static conclusion gets made from a dynamic observation.
+
+## dead_ends.json — the important one
 
 Record a refuted hypothesis *as soon as it is refuted*, with enough detail that
-the next reader can tell the test was adequate.
+the next reader can tell the test was adequate rather than merely abandoned.
 
-```markdown
-## LZ4 compression for the asset payload
+Three fields carry the weight:
 
-Status:     refuted (2026-03-14)
-Confidence: high — multiple independent decompressors rejected the data.
+| Field | Why it is required |
+| --- | --- |
+| `hypothesis` | a refutation without the claim says only that something failed |
+| `refuted_by` | what actually settled it, so nobody repeats the test |
+| `avoid` | what not to do instead — this is what turns history into guidance |
 
-Hypothesis: payload is LZ4-compressed.
-
-Tests performed:
-  - `lz4 -d` on the payload at offset 0x1a40        -> bad magic
-  - Python `lz4.frame.decompress()`                -> LZ4Error
-  - checked for the LZ4 frame magic 0x184D2204      -> absent
-  - checked for a raw LZ4 block header              -> absent
-  - compared byte distribution against LZ4 output entropy (~6.9 bits)
-                                                        -> measured 7.8
-
-Conclusion: not LZ4 in either framing. The high entropy remains unexplained;
-see hypotheses.md entry "high-entropy asset region".
+```sh
+scripts/recon-ledger.py add ./reconstruction dead_ends "LZ4 payload" \
+    --status refuted --source static \
+    --evidence "lz4 -d on the region at 0x1a40 -> bad magic" \
+    --evidence "Python lz4.frame.decompress() -> LZ4Error" \
+    --evidence "byte distribution vs LZ4 output entropy (~6.9 bits) -> 7.8" \
+    --hypothesis "the asset payload is LZ4-compressed" \
+    --refuted-by "two decoders and the magic bytes all disagree" \
+    --avoid "do not retry LZ4; the entropy is already-compressed level" \
+    --next-test "compare against a zstd frame, which fits 7.8 bits"
 ```
 
-The last line is the point: a refutation is not a dead end if it redirects the
-question. The next step was recorded rather than lost.
+The `next_test` is the redirect: a refutation that points at the next
+candidate is not a dead end, it is progress.
 
-## hypotheses.md — live status
+### Reopening one
 
-```markdown
-## Asset region at 0x1a40 is encrypted
+An idea legitimately comes back — a tool was missing, a trace was too short,
+the code was patched. Reopening it *silently* is what costs a day, because
+nobody realises the question was already settled.
 
-Status:     open
-Confidence: low
+So `add` checks every new entry against the dead ends and refuses a match that
+records nothing new:
 
-Evidence:
-  - 4 KiB region with entropy 7.8, no known magic
-  - byte distribution is flat (no obvious key-length periodicity)
-  - region is referenced by exactly one function (sub_4a2010)
-
-Hypothesis: the region is encrypted, with the key derived at runtime.
-
-Next test: trace sub_4a2010 during startup and look for a key-sized
-           buffer being written before the region is read.
+```
+$ recon-ledger.py add ./reconstruction formats "payload codec" \
+    --hypothesis "the asset payload is LZ4-compressed" ...
+error: this entry reopens a recorded dead end, and nothing records what is new:
+  - LZ4 payload: it restates the hypothesis a recorded dead end refuted
+      refuted by: two decoders and the magic bytes all disagree
+      recorded as: do not retry LZ4; measure entropy before choosing the codec
 ```
 
-`Status` is one of: `open`, `testing`, `confirmed`, `refuted`, `blocked`.
-`blocked` is for a test that cannot be run in this environment, with the
-precondition stated — so it is not silently retried either.
+Three things match: the same name, a reference to the dead end's subject, and
+a restatement of the claim. `--new-evidence` states what changed — a decoder
+that is now installed, a longer trace — and the entry goes in. A record of the
+reason is the whole requirement.
 
-## known-formats.md
+## hypotheses.json — live status
+
+`status: hypothesized` is the normal state of a claim the day it is formed.
+What it demands is a `next_test` or a recorded test, so that every live
+hypothesis is actionable by whoever picks it up.
+
+```sh
+scripts/recon-ledger.py add ./reconstruction hypotheses "asset at 0x1a40" \
+    --status hypothesized --confidence low --source static \
+    --evidence "entropy 7.8, no magic, referenced only by sub_4a2010" \
+    --hypothesis "encrypted, key derived at runtime" \
+    --next-test "trace sub_4a2010 at startup for a key-sized write"
+```
+
+A test that cannot be run in this environment is not a different status — it is
+a `next_test` that states the precondition, so it is not silently retried
+under identical conditions.
+
+## formats.json and protocols.json
 
 Record what has been decoded, with the decoder and any version assumption.
-This stops a format being re-derived from scratch and stops a *different*
+This stops a format being re-derived from scratch, and stops a *different*
 format being assumed to match.
 
-```markdown
-| Container | Location | Decoder | Notes |
-| --- | --- | --- | --- |
-| Package header | 0x0000-0x001f | manual, `known-offsets.md` | magic 0x5051474D |
-| Asset table | 0x2000+ | custom TLV | entries are (tag u16, len u32) |
-| Texture blob | assets/tex/* | `binwalk` marked data | DCT/blocks, not raw PNG |
+```sh
+scripts/recon-ledger.py add ./reconstruction formats "package header" \
+    --status reconstructed --source asset \
+    --evidence "magic 0x5051474M at 0x0000, fields parse for 40 entries" \
+    --hypothesis "custom TLV: tag u16, length u32" \
+    --tests "round-tripped 40 entries byte-identically" \
+    --next-test "check whether the length counts the tag"
+
+scripts/recon-ledger.py add ./reconstruction protocols "session control" \
+    --status observed --source protocol \
+    --evidence "40 captures; the length at +0x00 equals the frame size" \
+    --observed-behavior "one connection, client sends type 2, server type 1"
 ```
 
-## known-offsets.md
+A parser that has not run against real bytes is a hypothesis, not a protocol.
+
+## structures.json — offsets
 
 Structures shift between versions. Record the version each offset was derived
 from, or the note is worthless next month.
 
-```markdown
-## Player (derived from v1.4.2, 2026-03-11)
-
-| Offset | Size | Evidence | Confidence |
-| --- | --- | --- | --- |
-| +0x00 | 8 | passed to memcpy as src in sub_4a1230 | high — pointer |
-| +0x08 | 4 | compared against 0..1000 range in sub_4a1300 | medium — integer |
-| +0x0c | 4 | written once at init, never in hot path | low — guess |
-
-Not re-verified against v1.5.0. Field semantics beyond +0x08 unknown.
+```json
+{"name": "entity_state", "kind": "structure",
+ "status": "partially-reconstructed", "source": "runtime",
+ "derived_from": "libfoo.so v1.4.2 (sha256:…)",
+ "fields": [
+   {"offset": "+0x08", "size": 4, "type": "int32",
+    "evidence": "compared against 0..1000 in sub_4a1300", "confidence": "medium"},
+   {"offset": "+0x0c", "size": 4, "type": "unknown",
+    "evidence": "written once at init, never in the hot path", "confidence": "low"}],
+ "notes": "no access past +0x0c observed; the struct may be larger"}
 ```
 
-The "not re-verified" line is load-bearing. It tells the next reader the
-offsets may not hold.
-
-## known-protocols.md
-
-```markdown
-## Session control channel
-
-Framing:   4-byte big-endian total length at +0x00, including the 4-byte
-           header. Confirmed on 40 captures (big-endian equals observed
-           length; little-endian did not).
-Fields:    +0x00 u32 total_length    confirmed
-           +0x04 u16 message_type    confirmed (type 31 gates the
-                                     "unauthorised" response)
-           +0x06 u16 unknown         varies; does not affect dispatch
-           +0x08 ...                payload; offsets not established
-Dispatch:  jump table at 0xb000, 0x40 entries, branches to sub_401a20
-           for type 31.
-Unknown:   purpose of +0x06; no malformed-input testing performed.
-```
+The `fields` list is optional and only affects how `render` lays out
+`known-offsets.md`. The "no access past +0x0c" line is load-bearing: it tells
+the next reader where the layout stops being known.
 
 ## Reading state before working
 
-The habit that matters: **read `dead-ends.md` before forming a hypothesis**.
-It costs seconds and saves the re-test.
-
 ```sh
-cat project-state/dead-ends.md | head -50
+scripts/recon-ledger.py gaps ./reconstruction        # what is still open
+scripts/recon-ledger.py render ./reconstruction -o ./project-state/
+cat project-state/dead-ends.md
 ```
 
-When a new refutation lands, write it immediately. A dead end recorded late is
-a dead end retried.
+`gaps` is the command that replaces reading five files. It reports, from the
+ledger:
+
+- claims whose status outruns their recorded tests;
+- hypotheses with nothing that could settle them;
+- recorded contradictions with no recorded answer;
+- assumptions that other entries depend on;
+- **categories never asked** — an empty category means the question was never
+  asked, not that it was answered;
+- entries with no recorded `source`.
+
+That last distinction is the one a status summary gets wrong most easily. A
+ledger full of `verified` entries and seven empty categories is not a finished
+investigation.
 
 ## Keeping the state honest
 
+- Record a refutation the moment it happens. A dead end recorded late is a
+  dead end retried.
 - Date every entry. A refutation from three versions ago may be stale.
 - Record the version the evidence came from.
 - Prefer "refuted" with detail over silence. Silence loses the information.
-- When a dead end is *reopened*, say why — new evidence, or a better test.
-  A hypothesis rejected for a weak reason deserves another attempt.
-- Delete entries that no longer apply rather than leaving them to mislead.
-
-The state files are working notes. When the investigation concludes, the
-durable output is the report; the state directory is scaffolding and can be
-discarded.
+- Say what was tried, not just what failed. "Three decompressors" is a result;
+  "tried x" is a lead.
+- When a dead end is reopened, `--new-evidence` says why.
 
 ## Runtime observations in the state
 
-A runtime finding is worth recording with the same care as a static one, and
+A runtime finding is recorded like any other entry, with `source: runtime`, and
 it brings two fields a static finding does not have: the **thread**, and the
 **version of the build the address was taken from**.
 
 - A write with no tid cannot be attributed, and under concurrency the
   attribution is usually the point.
-- A runtime address is meaningless in the state file. Record
-  `module+0xoffset`, which survives ASLR, and note the module base separately
-  if the map is saved.
+- A runtime address is meaningless in the state file. Record `module+0xoffset`,
+  which survives ASLR, and note the module base separately if the map is saved.
 - Record whether the observation came from a saved map, a debugger, or an
   in-process hook. `memory-map.py` reading a file and a watchpoint under a
   debugger are not the same evidence, and only one of them perturbs the run.
@@ -186,3 +249,11 @@ beside it. "0x1400 ran and then the field changed" is a correlation; the
 experiment that makes it a cause is a separate entry, and until it runs the
 claim stays a hypothesis. `scripts/runtime-events.py --validate` rejects the
 `caused_by` field without one.
+
+## See also
+
+- `reconstruction.md` — where reconstruction sits, and what it owes
+- `methodology.md` — the evidence loop these entries serve
+- `differential-testing.md` — recording tests and what they showed
+- `memory-runtime.md` — the runtime observations that enter here
+- `templates/reconstruction/README.md` — the full entry schema

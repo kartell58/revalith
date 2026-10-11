@@ -128,6 +128,38 @@ make a reimplementation pass its tests while remaining wrong.
 sends you back to static analysis of the condition. Treating the loop as
 linear is how a hypothesis gets baked into code before it is tested.
 
+## Recording
+
+Every claim goes into the ledger, on the day it is formed and again when it is
+settled:
+
+```sh
+scripts/recon-ledger.py add ./reconstruction functions 0x8120 \
+    --evidence "called once per frame from the main loop" \
+    --hypothesis "per-frame update of a persistent entity state" \
+    --next-test "trace the writes across two frames" \
+    --status hypothesized --confidence low --source static
+
+scripts/recon-ledger.py gaps ./reconstruction      # what is still open
+```
+
+Three habits do the work:
+
+**Record the source.** `--source` names the layer the evidence came from. An
+entry whose source is unknown cannot be re-checked the way it was found, and a
+claim that rested on a watchpoint defended later as a static reading is how a
+dynamic observation becomes a static conclusion.
+
+**Record the refutation.** A hypothesis that turns out to be wrong moves to
+`dead_ends` with what killed it and what not to do instead. It is not deleted,
+because deleting it is indistinguishable from never having tried it. `add`
+refuses an entry that reopens a dead end without `--new-evidence`, so the idea
+can only come back with a reason.
+
+**Ask `gaps`, not `stats`, to choose the next step.** `stats` answers what has
+been found, which makes a long reconstruction feel finished. `gaps` answers
+what is still unknown, including the categories nobody has asked about at all.
+
 ## Standing rules
 
 These are the parts of the evidence discipline that reconstruction is most

@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0",
+  "category": "dead_ends",
+  "kind": "dead_end",
+  "description": "Hypotheses that were tested and did not survive. A refutation nobody can find again is a refutation that gets retried.",
+  "count": 1,
+  "entries": [
+    {
+      "name": "EXAMPLE: <the hypothesis in one line>",
+      "kind": "dead_end",
+      "status": "refuted",
+      "source": "static",
+      "evidence": [
+        "EXAMPLE, replace: `lz4 -d` on the region at 0x0000a1a40 -> bad magic",
+        "EXAMPLE: Python `lz4.frame.decompress()` -> LZ4Error",
+        "EXAMPLE: the LZ4 frame magic 0x184D2204 is absent from the region"
+      ],
+      "hypothesis": "EXAMPLE: the asset payload is LZ4-compressed",
+      "confidence": "high",
+      "confidence_basis": "two independent decoders and the magic bytes all disagree; this is a settled negative, not an open question",
+      "refuted_by": "two decoders rejected the data and the frame magic is absent",
+      "avoid": "do not retry LZ4 here; measure entropy before choosing the next codec, because 7.8 bits/byte is not the ~6.9 that LZ4 output would show",
+      "next_test": "EXAMPLE: compare against a zstd frame, which fits the observed entropy",
+      "notes": "EXAMPLE: record the target with enough identity to find it again -- version, hash, offset. A refutation that cannot be located cannot be reused."
+    }
+  ]
+}

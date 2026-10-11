@@ -59,8 +59,27 @@ cmp out.1.bin out.2.bin && cmp out.2.bin out.3.bin \
   || echo "NOT deterministic: investigate the source before comparing"
 ```
 
-If it is not deterministic, find out what varies and control it. Comparing a
-deterministic implementation against a nondeterministic one produces
+When the runs emit JSON observations, `scripts/determinism-check.py` does the
+comparison and names the fields that vary:
+
+```sh
+scripts/determinism-check.py out.1.json out.2.json out.3.json
+scripts/determinism-check.py --run "./original --seed 42 --dump" --times 5
+```
+
+It reports which fields differ and lists where variation usually comes from.
+It deliberately does not name a cause: "`position.y` differs between runs" is a
+measurement, "the clock is not stubbed" is a hypothesis, and a tool that
+printed the second would be asserting what the data does not say. Agreement
+across N runs is also reported as evidence rather than proof, with the sample
+count attached, because a divergence that appears only on the hundredth run is
+still a divergence.
+
+A field that stops being reported counts as variation too. That one is easier
+to miss than a value that changes, and just as fatal to the comparison.
+
+If the original is not deterministic, find out what varies and control it.
+Comparing a deterministic implementation against a nondeterministic one produces
 divergences that are noise, and the temptation is to "fix" them in the
 reimplementation — which makes it worse, not better.
 

@@ -1,7 +1,11 @@
 # Reconstruction ledger
 
-Eight JSON files, one per category. A tool maintains them; the schema is
+Ten JSON files, one per category. A tool maintains them; the schema is
 enforced so a hypothesis cannot quietly become a fact.
+
+This is the **single source of truth** for an investigation's state. The
+Markdown in `templates/project-state/` is a rendered view of this ledger, not a
+second store to keep in sync by hand.
 
 ## The problem this solves
 
@@ -45,6 +49,11 @@ reports the violation rather than silently accepting it.
 name                 required. Unique within its file.
 kind                 set from the category; do not write it by hand.
 status               required. One of the values above.
+source               which layer produced the evidence: `static`, `dynamic`,
+                     `runtime`, `dump`, `diff`, `asset`, `protocol`,
+                     `other`. Optional but worth recording: an entry whose
+                     source is unknown cannot be re-checked the way it was
+                     found, and `gaps` reports the ones that omit it.
 evidence             required by most statuses. One observation per entry,
                      naming what was seen and where. "Reads the word at
                      +0x08 in 0x8120", not "looks like a coordinate".
@@ -73,6 +82,12 @@ tests                a test that could have failed, and what it showed.
 next_test            what would settle this, when it has not been run.
                      Recording this is not the same as recording a test.
 refuted_by           what ruled it out, when status is refuted.
+avoid                what not to do next. Required on a `dead_ends` entry,
+                     where it is the difference between a note and guidance.
+new_evidence          what changed since a recorded dead end refuted this.
+                     `add` refuses an entry that reopens a dead end without
+                     it, because reopening an idea silently is how a settled
+                     question costs a day.
 related_functions    cross-references. These make the entry load-bearing, and
 related_data            `stats` reports assumptions that others depend on.
 related_structures
@@ -98,23 +113,47 @@ scripts/recon-ledger.py add ./reconstruction functions 0x8120 \
     --evidence "writes the word at +0x10" \
     --hypothesis "per-frame update of a persistent entity state" \
     --next-test "trace writes to +0x08/+0x0c/+0x10 across two frames" \
-    --status hypothesized --confidence low
+    --status hypothesized --confidence low --source static
 
 # move it when the test settles it
 scripts/recon-ledger.py update ./reconstruction functions 0x8120 \
     --status reconstructed --confidence high \
     --tests "traced over 60 frames: all three writes advance together"
 
+# a refutation, the moment it happens
+scripts/recon-ledger.py add ./reconstruction dead_ends "LZ4 payload" \
+    --status refuted --source static \
+    --evidence "lz4 -d at 0x1a40 -> bad magic" \
+    --hypothesis "the asset payload is LZ4-compressed" \
+    --refuted-by "two decoders and the magic bytes all disagree" \
+    --avoid "do not retry LZ4; measure entropy before choosing the codec"
+
 # what is assumed, and what depends on it
 scripts/recon-ledger.py stats ./reconstruction
 scripts/recon-ledger.py validate ./reconstruction
+
+# what is still open
+scripts/recon-ledger.py gaps ./reconstruction
+
+# write the readable project-state files from the ledger
+scripts/recon-ledger.py render ./reconstruction -o ./project-state/
 ```
 
-## The habit that matters
+## The habits that matter
 
 Run `stats` before extending the reconstruction. It reports assumptions that
 other entries depend on. Those are the places where an error propagates
 furthest, and they are the first things worth confirming.
+
+Run `gaps` when deciding what to investigate next. `stats` answers "what have I
+found", which makes a long investigation feel finished; `gaps` answers "what is
+still unknown", which is what picks the next hour of work. An empty category
+there means the question was never asked, not that it was answered.
+
+Record a refutation the moment it happens. `add` refuses an entry that reopens
+a dead end without `--new-evidence`, so an idea can come back only with a
+reason — a tool that was missing, a trace that was too short, code that
+changed.
 
 ## Categories
 
@@ -126,5 +165,11 @@ furthest, and they are the first things worth confirming.
 | `states.json` | states, state machines, observable transitions |
 | `systems.json` | groups of functions forming a subsystem |
 | `formats.json` | asset and file formats, decoded |
+| `protocols.json` | wire protocols: framing, fields, state machine |
 | `hypotheses.json` | open claims, each with a next test |
 | `verification.json` | tests run, and what each one showed |
+| `dead_ends.json` | refuted investigations, with what not to retry |
+
+`dead_ends.json` is the one that pays for itself. A refuted hypothesis that is
+recorded here is never re-tested; one that is not, will be — usually by the
+same investigation, weeks later, paying for it twice.

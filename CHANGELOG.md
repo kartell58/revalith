@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Versions are for the skill, not for a target being analysed.
 
+## [4.2.0] — 2026-10-11
+
+One store for investigation state, and a determinism gate before any
+differential comparison.
+
+### The ledger is now the only store
+
+An investigation's state lived in two places: the reconstruction ledger, which
+was machine-readable and validated, and `templates/project-state/`, which was
+Markdown maintained by hand. Both were correct when written, and they stopped
+agreeing — a session read the Markdown, reached a conclusion, recorded it in
+the ledger, and did not update the notes. Nothing reports that disagreement,
+because nothing could.
+
+The ledger gains the two categories that only the Markdown had:
+
+- `dead_ends` — the file the skill's own docs called "the important one" had
+  no equivalent in the machine-readable store. A dead end is validated: it
+  must record what was believed (`hypothesis`), what killed it (`refuted_by`),
+  and what not to do instead (`avoid`). Without `avoid` it is history rather
+  than guidance.
+- `protocols` — wire formats had no category of their own and lived loosely
+  under `formats`.
+
+The readable Markdown is now **rendered** from the ledger by
+`recon-ledger.py render`, with a banner saying so. Two renders of one ledger
+are byte-identical, so a regenerated file shows a real change rather than a
+formatting one. `templates/project-state/` becomes the reference format.
+
+### Reopening a dead end now needs a reason
+
+An idea legitimately comes back: a tool was missing, a trace was too short, the
+code was patched. Reopening it *silently* is what costs a day, because nobody
+realises the question was already settled.
+
+`add` checks every new entry against the dead ends and refuses a match that
+records nothing new. Three routes match — the same name, a reference to the
+dead end's subject, and a restatement of the claim. `--new-evidence` states
+what changed and the entry goes in. The requirement is a recorded reason, not
+a prohibition.
+
+### `gaps` — what is still open
+
+The counter-question to `stats`. Stats answers what has been found, which
+makes a long investigation feel finished; `gaps` answers what has not, which is
+what picks the next hour of work. Derived entirely from recorded entries, so it
+cannot invent a gap: claims whose status outruns their tests, hypotheses
+nothing can settle, contradictions with no recorded answer, assumptions others
+depend on, and **categories never asked** — an empty category is an unasked
+question, not an answered one.
+
+### `source` — provenance per entry
+
+`static` · `dynamic` · `runtime` · `dump` · `diff` · `asset` · `protocol` ·
+`other`. Optional, because a first entry often predates knowing how it was
+found, and validated when present. An entry whose source is unknown cannot be
+re-checked the way it was found, and `gaps` reports the ones that omit it.
+
+### `determinism-check.py`
+
+`differential-testing.md` told you to establish determinism before comparing
+anything, and nothing executed it. The new tool compares N observations, names
+the fields that vary, and lists where variation usually comes from.
+
+It deliberately does not name a cause. "position.y differs between runs" is a
+measurement; "the clock is not stubbed" is a hypothesis, and a tool that
+printed the second would be asserting what the data does not say. A field that
+stops being reported counts as variation too — easier to miss than a changing
+value, and just as fatal. Agreement across N runs is reported as evidence, not
+proof, with the sample count attached.
+
 ## [4.1.0] — 2026-10-11
 
 Evidence accounting for the reconstruction ledger, and ownership as a

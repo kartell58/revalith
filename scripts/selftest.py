@@ -1106,6 +1106,322 @@ def test_recon_evidence_accounting_is_weighted():
     eq(built.get("contradicting"), ["b"], "contradicting is stored")
 
 
+def test_recon_source_is_validated():
+    """Provenance is optional but never free-form.
+
+    An entry whose source is unknown cannot be re-checked the way it was
+    found, which is the whole point of recording it.
+    """
+    e = _reconlib.new_entry("0x8120", "function", status="observed",
+                            evidence=["traced"], source="runtime")
+    eq(_reconlib.validate_entry(e, "function"), [],
+       "a known source validates")
+
+    bad = dict(e)
+    bad["source"] = "telepathy"
+    check(any("source 'telepathy'" in p
+              for p in _reconlib.validate_entry(bad, "function")),
+          "an invented source is refused")
+
+    # Optional: a first entry often predates knowing how it was found.
+    check("source" not in e or e.get("source") == "runtime",
+          "source is recorded when given")
+    del_source = _reconlib.new_entry("0x9000", "function", status="observed",
+                                     evidence=["seen in a dump"])
+    check("source" not in del_source,
+          "source stays absent when not given, rather than defaulting")
+    eq(_reconlib.validate_entry(del_source, "function"), [],
+       "an entry without a source is still valid")
+
+
+def test_recon_dead_end_records_what_was_believed(tmp):
+    """A dead end without 'avoid' is history; with it, it is guidance."""
+    good = _reconlib.new_entry(
+        "LZ4 payload", "dead_end", status="refuted", source="static",
+        evidence=["lz4 -d: bad magic"],
+        hypothesis="the payload is LZ4-compressed",
+        refuted_by="two decoders and the magic bytes disagree",
+        avoid="measure entropy before choosing the next codec")
+    eq(_reconlib.validate_entry(good, "dead_end"), [], "a complete dead end validates")
+
+    for missing, why in (("hypothesis", "what was believed"),
+                         ("avoid", "what not to do next")):
+        entry = dict(good)
+        entry.pop(missing)
+        check(_reconlib.validate_entry(entry, "dead_end"),
+              f"a dead end without '{missing}' is refused ({why})")
+
+    reopened = dict(good)
+    reopened["status"] = "hypothesized"
+    check(any("by definition refuted" in p
+              for p in _reconlib.validate_entry(reopened, "dead_end")),
+          "a dead end cannot be left in a live status")
+
+    # A dead-end file must exist in every ledger, so `init` and the template
+    # check agree about what a complete ledger looks like.
+    check("dead_ends" in _reconlib.LEDGER_KINDS,
+          "dead_ends is a ledger category, not a convention")
+    check("protocols" in _reconlib.LEDGER_KINDS,
+          "protocols is a ledger category of its own")
+
+
+def test_recon_reopening_a_dead_end_is_detected():
+    """The mechanical form of 'have we been here before'.
+
+    The three matching routes correspond to the three ways the same idea
+    comes back: under its old name, by pointing at the dead end, and by
+    restating the claim in new words.
+    """
+    dead = _reconlib.new_entry(
+        "LZ4 asset payload", "dead_end", status="refuted", source="static",
+        evidence=["bad magic"],
+        hypothesis="the asset payload is LZ4-compressed",
+        refuted_by="two decoders disagree",
+        avoid="do not retry LZ4")
+    deads = [dead]
+
+    same_name = _reconlib.new_entry(
+        "LZ4 asset payload", "format", status="hypothesized", evidence=["x"],
+        hypothesis="h", next_test="t")
+    check(_reconlib.find_reopened_dead_ends(same_name, deads),
+          "an entry with the dead end's name reopens it")
+
+    refers = _reconlib.new_entry(
+        "payload codec", "format", status="hypothesized", evidence=["x"],
+        hypothesis="h", next_test="t", related_data=["LZ4 asset payload"])
+    check(_reconlib.find_reopened_dead_ends(refers, deads),
+          "an entry referring to the dead end reopens it")
+
+    restates = _reconlib.new_entry(
+        "codec", "format", status="hypothesized", evidence=["x"],
+        hypothesis="the asset payload is LZ4-compressed", next_test="t")
+    check(_reconlib.find_reopened_dead_ends(restates, deads),
+          "an entry restating the refuted claim reopens it")
+
+    unrelated = _reconlib.new_entry(
+        "tile atlas", "format", status="hypothesized", evidence=["x"],
+        hypothesis="a grid of 8x8 tiles", next_test="t")
+    eq(_reconlib.find_reopened_dead_ends(unrelated, deads), [],
+       "an unrelated entry does not reopen a dead end")
+
+    # The point is not to forbid it: new evidence makes it legitimate.
+    with_new = _reconlib.find_reopened_dead_ends(
+        restates, deads, new_evidence="an lz4 decoder is installed now")
+    check(with_new and with_new[0]["has_new_evidence"],
+          "new evidence makes reopening a dead end legitimate")
+    without = _reconlib.find_reopened_dead_ends(restates, deads)
+    check(without and not without[0]["has_new_evidence"],
+          "without new evidence the reopening is flagged")
+    check(without[0]["avoid"], "the flagged entry carries what not to do")
+
+
+def test_recon_gaps_reports_what_is_open(tmp):
+    """The counter-question to stats: not what was found, but what is not."""
+    root = os.path.join(tmp, "gaps")
+    led = _reconlib.Ledger(root)
+    os.makedirs(root, exist_ok=True)
+    for cat in _reconlib.LEDGER_KINDS:
+        led.write(cat, [])
+
+    led.add("functions", _reconlib.new_entry(
+        "0x8120", "function", status="hypothesized", evidence=["seen"],
+        source="runtime"))                      # nothing can settle it
+    led.add("functions", _reconlib.new_entry(
+        "0x9000", "function", status="verified", evidence=["seen"],
+        tests=["ran once"]))                    # verified, but no source
+    led.add("dead_ends", _reconlib.new_entry(
+        "LZ4", "dead_end", status="refuted", evidence=["bad magic"],
+        hypothesis="payload is LZ4", source="static",
+        refuted_by="decoders disagree", avoid="do not retry"))
+
+    report = _reconlib.gaps(led)
+    names = lambda key: [g.get("name") for g in report[key]]  # noqa: E731
+
+    check("0x8120" in names("unactionable_hypotheses"),
+          "a hypothesis with no test and no next_test is reported as open")
+    check("0x9000" in names("unsourced_entries"),
+          "an entry with no recorded source is reported")
+    check("dead_ends" not in report["empty_categories"],
+          "a category that holds an entry is not reported as never asked")
+    check("states" in report["empty_categories"],
+          "a category never asked is reported, and is not confused with one "
+          "that was answered")
+    eq(report["counts"]["dead_ends"], 1, "recorded dead ends are counted")
+
+    clean = _reconlib.gaps(_reconlib.Ledger(root))
+    check("ledger" in clean and "counts" in clean,
+          "gaps is derived and self-describing")
+
+    # A ledger that is empty is not a ledger that is finished.
+    empty_root = os.path.join(tmp, "empty-gaps")
+    os.makedirs(empty_root, exist_ok=True)
+    for cat in _reconlib.LEDGER_KINDS:
+        led_e = _reconlib.Ledger(empty_root)
+        led_e.write(cat, [])
+    report_e = _reconlib.gaps(_reconlib.Ledger(empty_root))
+    eq(report_e["counts"]["entries"], 0, "an empty ledger has no entries")
+    check(len(report_e["empty_categories"]) == len(_reconlib.LEDGER_KINDS),
+          "every category counts as never asked in an empty ledger")
+    check("never asked" in report_e["note"],
+          "an empty category is named as unasked, not answered")
+
+
+def test_recon_render_is_deterministic(tmp):
+    """A regenerated view must show a real change, not a formatting one."""
+    root = os.path.join(tmp, "render")
+    led = _reconlib.Ledger(root)
+    os.makedirs(root, exist_ok=True)
+    for cat in _reconlib.LEDGER_KINDS:
+        led.write(cat, [])
+    led.add("dead_ends", _reconlib.new_entry(
+        "LZ4", "dead_end", status="refuted", evidence=["bad magic"],
+        hypothesis="payload is LZ4", source="static",
+        refuted_by="decoders disagree", avoid="do not retry"))
+    led.add("protocols", _reconlib.new_entry(
+        "session control", "protocol", status="observed",
+        evidence=["40 frames"], source="protocol"))
+
+    first = _reconlib.render_state(led)
+    second = _reconlib.render_state(led)
+    eq(first, second, "two renders of one ledger are identical")
+
+    expected = {"investigation-state.md", "dead-ends.md", "hypotheses.md",
+                "known-formats.md", "known-offsets.md", "known-protocols.md"}
+    eq(sorted(first), sorted(expected), "the rendered set is fixed")
+
+    for name, text in first.items():
+        check("GENERATED" in text,
+              f"{name} says it is generated, so nobody edits it by hand")
+    check("LZ4" in first["dead-ends.md"],
+          "a dead end reaches the rendered view")
+    check("dead ends recorded: 1" in first["investigation-state.md"],
+          "the overview counts dead ends")
+    check("LZ4" not in first["investigation-state.md"],
+          "the overview counts; it does not restate entries that the "
+          "per-category views already hold")
+    check("session control" in first["known-protocols.md"],
+          "a protocol reaches its rendered view")
+
+    # A pipe inside a table cell would otherwise break the row silently.
+    led.add("structures", _reconlib.new_entry(
+        "entity_state", "structure", status="partially-reconstructed",
+        evidence=["16 bytes"], fields=[
+            {"offset": "+0x08", "size": 4, "type": "int32",
+             "evidence": "compared against 0..1000", "confidence": "medium"}]))
+    table = _reconlib.render_state(led)["known-offsets.md"]
+    check("+0x08" in table, "a structure field reaches the offsets table")
+    check("| --- |" in table, "the offsets table has a header separator")
+
+
+def test_determinism_check_separates_measurement_from_cause():
+    """The tool says what varies. It must not say what made it vary."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "determinism-check.py")
+    spec = importlib.util.spec_from_file_location("determinism_check", path)
+    det = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(det)
+
+    runs = [
+        ("run1", _reconlib.flatten({"frame": 0, "pos": {"x": 10, "y": 20}})),
+        ("run2", _reconlib.flatten({"frame": 0, "pos": {"x": 10, "y": 20}})),
+        ("run3", _reconlib.flatten({"frame": 0, "pos": {"x": 10, "y": 21}})),
+    ]
+    same = det.analyse(runs[:2], 0.0, None)
+    check(same["deterministic"], "two identical runs are deterministic")
+    eq(same["varying_fields"], [], "no field varies when the runs agree")
+
+    diff = det.analyse(runs, 0.0, None)
+    check(not diff["deterministic"], "a differing run is not deterministic")
+    varying = [f["field"] for f in diff["varying_fields"]]
+    eq(varying, ["pos.y"], "only the field that changed is reported")
+    check(diff["varying_fields"][0].get("numeric"),
+          "a numeric difference is measured, not described")
+    eq(diff["varying_fields"][0]["spread"], 1, "the spread is reported")
+
+    # A field that stops being reported is a divergence too.
+    dropped = det.analyse([
+        ("run1", _reconlib.flatten({"a": 1, "packet": {"n": 1}})),
+        ("run2", _reconlib.flatten({"a": 1})),
+    ], 0.0, None)
+    check(not dropped["deterministic"],
+          "a field absent from one run breaks determinism")
+    eq([f["field"] for f in dropped["fields_absent_in_some_runs"]],
+       ["packet.n"], "the absent field is named")
+
+    # Tolerance is a decision the caller makes, not a default that hides drift.
+    eq(det.same_value(10, 10.4, 0.5), True, "tolerance admits small numeric drift")
+    eq(det.same_value(10, 11, 0.5), False, "tolerance does not admit real drift")
+    eq(det.same_value(1, True, 0.0), False, "a bool is not the int 1")
+
+    text = det.render(diff, [], _Args())
+    check("places variation usually comes from" in text,
+          "the tool points at where to look")
+    check("not a" in text and "diagnosis" in text,
+          "the list of sources is framed as not a diagnosis")
+    check("clock" in text and "random" in text,
+          "the usual sources are named")
+    check("evidence, not proof" in text,
+          "agreement across runs is reported as evidence, not proof")
+
+    # A single run cannot establish determinism, and must not claim to.
+    single = det.analyse(runs[:1], 0.0, None)
+    check(single["deterministic"], "one run trivially agrees with itself")
+    check("UNDETERMINED" in det.render(single, [], _Args()),
+          "one run renders as UNDETERMINED, not as a verdict")
+
+
+class _Args:
+    """The few render() options the tests exercise."""
+    limit = 20
+
+
+def test_determinism_check_survives_a_bad_file(tmp):
+    """One unreadable observation is reported; the rest still decide."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "determinism-check.py")
+    spec = importlib.util.spec_from_file_location("determinism_check2", path)
+    det = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(det)
+
+    good = os.path.join(tmp, "good.json")
+    bad = os.path.join(tmp, "bad.json")
+    missing = os.path.join(tmp, "does-not-exist.json")
+    with open(good, "w", encoding="utf-8") as fh:
+        fh.write('{"a": 1}')
+    with open(bad, "w", encoding="utf-8") as fh:
+        fh.write("not json at all")
+
+    runs, errors = det.collect_runs(_Args2([good, bad, missing]))
+    eq(len(runs), 1, "the readable observation is kept")
+    eq(len(errors), 2, "both unreadable ones are reported")
+
+    flat, err = det.load_observation(bad)
+    check(flat is None and "not valid JSON" in err,
+          "an unparsable file is named as such")
+    flat, err = det.load_observation(missing)
+    check(flat is None and "cannot read" in err,
+          "a missing file is named as such")
+
+    empty = os.path.join(tmp, "empty.json")
+    open(empty, "w", encoding="utf-8").close()
+    flat, err = det.load_observation(empty)
+    check(flat is None and "empty" in err,
+          "an empty file is not silently treated as an empty observation")
+
+
+class _Args2:
+    """collect_runs() options, with --run unset so only files are read."""
+    run = None
+    times = 3
+    timeout = 5.0
+    cwd = None
+
+    def __init__(self, traces):
+        self.traces = traces
+
+
 def test_recon_ledger_validates_seed_templates():
     """The shipped templates must satisfy the validator, or every user's
     first ledger starts with eight reported problems."""
@@ -2168,6 +2484,10 @@ def main():
                    test_android_apk, test_unity_detection, test_archives_zip,
                    test_binaries_triage_notable,
                    test_recon_ledger_roundtrip,
+                   test_recon_dead_end_records_what_was_believed,
+                   test_recon_gaps_reports_what_is_open,
+                   test_recon_render_is_deterministic,
+                   test_determinism_check_survives_a_bad_file,
                    test_runtime_maps_parsing,
                    test_runtime_modules_and_load_bias,
                    test_runtime_address_normalisation,
@@ -2205,6 +2525,9 @@ def main():
                    test_runtime_capability_probe_is_three_state,
                    test_runtime_security_of_protection_readings,
                    test_recon_ledger_accepts_runtime_observations,
+                   test_recon_source_is_validated,
+                   test_recon_reopening_a_dead_end_is_detected,
+                   test_determinism_check_separates_measurement_from_cause,
                    test_tools_discovery_never_fails):
             try:
                 fn()

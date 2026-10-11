@@ -1,5 +1,12 @@
 # Known formats
 
+> **Reference format, not the live copy.** The files here show what the
+> readable views look like. The working copies in an investigation are
+> generated from the ledger by `recon-ledger.py render`, which
+> overwrites them: edit `reconstruction/*.json`, then re-render.
+> A hand-edited copy and the ledger disagree silently, and the one that
+> is checked first is the one that was wrong.
+
 Container, asset and data formats already identified in this target. Record
 the decoder used and any version assumption, so the format is not re-derived
 and a *similar-looking* format is not assumed to match.

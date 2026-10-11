@@ -71,7 +71,7 @@ STATUSES_REQUIRING_EVIDENCE = (
     "verified",
 )
 
-# The eight ledger files, with the entry kind each holds.
+# The ten ledger files, with the entry kind each holds.
 LEDGER_KINDS: Dict[str, str] = {
     "architecture": "architecture",
     "functions": "function",
@@ -79,9 +79,19 @@ LEDGER_KINDS: Dict[str, str] = {
     "states": "state",
     "systems": "system",
     "formats": "format",
+    "protocols": "protocol",
     "hypotheses": "hypothesis",
     "verification": "verification",
+    "dead_ends": "dead_end",
 }
+
+# Where an entry's evidence came from. One vocabulary across all three layers,
+# so "what do we actually know from runtime?" is answerable across the whole
+# ledger instead of by remembering which file an entry was filed under.
+SOURCES = [
+    "static", "dynamic", "runtime", "dump", "diff", "asset", "protocol",
+    "other",
+]
 
 REQUIRED_FIELDS = ("name", "kind", "status")
 
@@ -161,6 +171,32 @@ def validate_entry(entry: Dict, kind: Optional[str] = None) -> List[str]:
         problems.append(
             "status 'refuted' with no record of what refuted it; this is how "
             "hypotheses get re-tested")
+
+    # Provenance. Optional, because a first entry often predates knowing how it
+    # was found, but validated when present, because an entry that claims
+    # 'static' while resting on a runtime trace misleads whoever re-checks it.
+    source = entry.get("source")
+    if source is not None and source not in SOURCES:
+        problems.append(
+            f"source '{source}' is not one of: {', '.join(SOURCES)}")
+
+    # A dead end is a refuted investigation, and the three fields below are what
+    # make it worth recording: what was believed, what killed it, and what not
+    # to do instead. Without 'avoid' it is a note; with it, it prevents work.
+    if kind == "dead_end":
+        if status != "refuted":
+            problems.append(
+                "a dead end is by definition refuted; if the idea is live "
+                "again, record the new evidence and add a fresh entry rather "
+                "than reopening this one")
+        if not entry.get("hypothesis"):
+            problems.append(
+                "a dead end must record what was believed ('hypothesis'); a "
+                "refutation without the claim says only that something failed")
+        if not entry.get("avoid"):
+            problems.append(
+                "a dead end must record what not to do next ('avoid'), "
+                "otherwise it is history rather than guidance")
 
     # Related entries must exist as fields if used.
     for rel in ("related_functions", "related_data", "related_structures"):
@@ -280,6 +316,74 @@ def facts_vs_hypotheses(entries: Iterable[Dict]) -> Dict:
         "note": "an assumption that others depend on is the first thing to "
                 "verify: everything above it inherits its uncertainty",
     }
+
+
+def _norm(value: Any) -> str:
+    """Normalise a name for comparison: case and spacing are not identity."""
+    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+
+
+# Fields through which an entry can declare that it is about an existing entry.
+_REOPEN_REFERENCES = (
+    "about", "reopens", "related", "depends_on", "uses", "related_functions",
+    "related_data", "related_structures",
+)
+
+
+def find_reopened_dead_ends(entry: Dict, dead_ends: Iterable[Dict],
+                            new_evidence: Optional[Any] = None) -> List[Dict]:
+    """Dead ends that ``entry`` reopens.
+
+    The ledger can record a refutation, but recording it is not enough: the same
+    idea gets proposed again anyway, usually by someone who has not read the
+    dead-end file, or by a session that started from the artefacts rather than
+    the notes. This function is the mechanical form of "have we been here
+    before".
+
+    It reports, it does not forbid. A refuted idea can legitimately come back --
+    a tool that was missing is now present, a trace was too short, the code was
+    patched. What must not happen is reopening it silently, so the caller
+    requires ``new_evidence`` when there is a hit.
+    """
+    if not isinstance(entry, dict) or not dead_ends:
+        return []
+
+    name = _norm(entry.get("name"))
+    refers: set = set()
+    for field in _REOPEN_REFERENCES:
+        value = entry.get(field)
+        if isinstance(value, list):
+            refers |= {_norm(v) for v in value}
+        elif isinstance(value, str):
+            refers.add(_norm(value))
+    refers.discard("")
+
+    hypothesis = _norm(entry.get("hypothesis"))
+    hits: List[Dict] = []
+    for dead in dead_ends:
+        if not isinstance(dead, dict):
+            continue
+        dead_name = _norm(dead.get("name"))
+        dead_claim = _norm(dead.get("hypothesis"))
+        why = None
+        if dead_name and dead_name == name:
+            why = "it has the same name as a recorded dead end"
+        elif dead_name and dead_name in refers:
+            why = "it names a recorded dead end as what it is about"
+        elif (dead_claim and hypothesis and len(dead_claim) >= 16
+              and (dead_claim in hypothesis or hypothesis in dead_claim)):
+            why = "it restates the hypothesis a recorded dead end refuted"
+        if not why:
+            continue
+        hits.append({
+            "dead_end": dead.get("name"),
+            "refuted_by": dead.get("refuted_by") or dead.get("tests"),
+            "avoid": dead.get("avoid"),
+            "matched_because": why,
+            "has_new_evidence": bool(new_evidence
+                                     or entry.get("new_evidence")),
+        })
+    return hits
 
 
 # --------------------------------------------------------------------------
@@ -448,6 +552,287 @@ class Ledger:
         return report
 
 
+GENERATED_BANNER = (
+    "<!-- GENERATED by `recon-ledger.py render` from the ledger. Do not edit\n"
+    "     this file by hand: the next render overwrites it. Edit the ledger. -->"
+)
+
+
+def _cell(value: Any) -> str:
+    """One table cell: a pipe or a newline would break the row."""
+    text = str(value if value is not None else "").strip()
+    return text.replace("|", "\\|").replace("\n", " ")
+
+
+def _entries_sorted(ledger: "Ledger", category: str) -> List[Dict]:
+    try:
+        entries = ledger.read(category)
+    except LedgerError:
+        return []
+    return sorted((e for e in entries if isinstance(e, dict)),
+                  key=lambda e: str(e.get("name") or ""))
+
+
+def gaps(ledger: "Ledger") -> Dict:
+    """What the ledger cannot yet answer.
+
+    Derived entirely from what is recorded, so it cannot invent a gap and
+    cannot miss one that is already visible in the entries. This is the
+    question that never got asked: not "what have I found" but "what is still
+    unknown", which is the one that decides what to investigate next.
+    """
+    missing_tests: List[Dict] = []
+    unactionable: List[Dict] = []
+    unresolved: List[Dict] = []
+    unsourced: List[Dict] = []
+    empty: List[str] = []
+    everything: List[Dict] = []
+
+    for category in LEDGER_KINDS:
+        entries = _entries_sorted(ledger, category)
+        if not entries:
+            empty.append(category)
+        for e in entries:
+            everything.append(e)
+            name, status = e.get("name"), e.get("status")
+            tests = e.get("tests") or []
+            contradicting = e.get("contradicting") or []
+            if status in STATUSES_REQUIRING_TEST and not tests:
+                missing_tests.append({
+                    "name": name, "category": category, "status": status,
+                    "why": "the status claims it was tested; no test is recorded",
+                })
+            if status == "hypothesized" and not tests and not e.get("next_test"):
+                unactionable.append({
+                    "name": name, "category": category,
+                    "why": "a hypothesis with nothing that could settle it",
+                })
+            if contradicting and not e.get("contradiction_resolved"):
+                unresolved.append({
+                    "name": name, "category": category, "status": status,
+                    "why": "observations argue against it and nothing says how "
+                           "that was answered",
+                })
+            if not e.get("source"):
+                unsourced.append({"name": name, "category": category})
+
+    fv = facts_vs_hypotheses(everything)
+    report: Dict[str, Any] = {
+        "ledger": ledger.root,
+        "missing_tests": missing_tests,
+        "unactionable_hypotheses": unactionable,
+        "unresolved_contradictions": unresolved,
+        "load_bearing_assumptions": fv["load_bearing_assumptions"],
+        "empty_categories": empty,
+        "unsourced_entries": unsourced,
+        "counts": {
+            "entries": len(everything),
+            "missing_tests": len(missing_tests),
+            "unactionable_hypotheses": len(unactionable),
+            "unresolved_contradictions": len(unresolved),
+            "load_bearing_assumptions": len(fv["load_bearing_assumptions"]),
+            "dead_ends": len(_entries_sorted(ledger, "dead_ends")),
+            "empty_categories": len(empty),
+            "unsourced_entries": len(unsourced),
+        },
+        "note": "an empty category means the question was never asked, not "
+                "that it was answered; 'unsourced' means the layer that "
+                "produced the evidence was not recorded, so the entry cannot "
+                "be re-checked the way it was found",
+    }
+    report["clear"] = not (missing_tests or unactionable or unresolved)
+    return report
+
+
+def _entry_block(e: Dict, lines: List[str]) -> None:
+    """One entry in the readable, hand-editable formats the project state uses."""
+    lines.append(f"## {e.get('name')}")
+    lines.append("")
+    status = e.get("status")
+    if e.get("source"):
+        status = f"{status} (source: {e['source']})"
+    lines.append(f"Status:     {status}")
+    if e.get("confidence"):
+        lines.append(f"Confidence: {e['confidence']}"
+                     + (f" -- {e['confidence_basis']}"
+                        if e.get("confidence_basis") else ""))
+    for label, field in (("Hypothesis", "hypothesis"),
+                         ("Observed behaviour", "observed_behavior"),
+                         ("Refuted by", "refuted_by"),
+                         ("Do not", "avoid"),
+                         ("Next test", "next_test"),
+                         ("Notes", "notes")):
+        if e.get(field):
+            lines.append(f"{label + ':':<12} {e[field]}")
+    for label, field in (("Tests performed", "tests"),
+                         ("Evidence", "evidence")):
+        values = e.get(field) or []
+        if values:
+            lines.append(f"{label + ':':<12}")
+            for v in values:
+                lines.append(f"  - {v}")
+    lines.append("")
+
+
+def render_state(ledger: "Ledger") -> Dict[str, str]:
+    """Render the readable project-state files from the ledger.
+
+    The point is that there is one place where an investigation's state lives.
+    A second, hand-maintained store is how a session ends up contradicting the
+    ledger: both are correct on different days and nothing notices.
+
+    Output is fully determined by the ledger contents and is sorted by name, so
+    two renders of the same ledger are byte-identical and a regenerated file
+    shows a real change rather than a formatting one.
+    """
+    files: Dict[str, str] = {}
+
+    # -- dead ends --------------------------------------------------------
+    dead = _entries_sorted(ledger, "dead_ends")
+    lines = ["# Dead ends", "", GENERATED_BANNER, "",
+             "Hypotheses that were tested and did not survive. A refuted",
+             "hypothesis that is not recorded here gets re-tested in a later",
+             "session, and the time spent will be invisible to anyone",
+             "reviewing the work.", ""]
+    if dead:
+        for e in dead:
+            _entry_block(e, lines)
+    else:
+        lines += ["No dead ends recorded.", ""]
+    files["dead-ends.md"] = "\n".join(lines).rstrip() + "\n"
+
+    # -- live hypotheses --------------------------------------------------
+    hyps = [e for e in _entries_sorted(ledger, "hypotheses")
+            if e.get("status") != "refuted"]
+    lines = ["# Hypotheses", "", GENERATED_BANNER, "",
+             "Live hypotheses with their status and next test. A hypothesis",
+             "that has been refuted belongs in `dead_ends.md`, not here in a",
+             "stale state.", ""]
+    if hyps:
+        for e in hyps:
+            _entry_block(e, lines)
+    else:
+        lines += ["No live hypotheses recorded.", ""]
+    files["hypotheses.md"] = "\n".join(lines).rstrip() + "\n"
+
+    # -- known formats and protocols --------------------------------------
+    for category, title, filename, blurb in (
+        ("formats", "Known formats", "known-formats.md",
+         "Container and file formats decoded so far. A repeating record size is"
+         " a structure, not yet a format."),
+        ("protocols", "Known protocols", "known-protocols.md",
+         "Wire formats decoded so far: framing, fields, state machine. A"
+         " parser that has not been run against real bytes is a hypothesis."),
+    ):
+        entries = _entries_sorted(ledger, category)
+        lines = [f"# {title}", "", GENERATED_BANNER, "", blurb, ""]
+        if entries:
+            for e in entries:
+                _entry_block(e, lines)
+        else:
+            lines += [f"Nothing recorded in `{category}.json` yet.", ""]
+        files[filename] = "\n".join(lines).rstrip() + "\n"
+
+    # -- known offsets ----------------------------------------------------
+    entries = _entries_sorted(ledger, "structures")
+    lines = ["# Known offsets", "", GENERATED_BANNER, "",
+             "Structures recovered from this target, with the evidence behind",
+             "each field.", "",
+             "Offsets shift between versions. Record which version an offset",
+             "was derived from: an offset without a version is worse than no",
+             "offset, because it will be trusted where it no longer holds.",
+             "",
+             "An unverified field is better than an invented one. Write",
+             "`unknown` rather than guessing a semantic name.", ""]
+    if entries:
+        lines += ["## Structures", ""]
+        for e in entries:
+            lines.append(f"### {e.get('name')}")
+            lines.append("")
+            for label, field in (("Derived from", "derived_from"),
+                                 ("Derived on", "derived_on"),
+                                 ("Hypothesis", "hypothesis"),
+                                 ("Confidence", "confidence"),
+                                 ("Still unknown", "notes"),
+                                 ("Next test", "next_test")):
+                if e.get(field):
+                    lines.append(f"{label + ':':<14} {e[field]}")
+            fields = e.get("fields") or []
+            if fields:
+                lines += ["", "| Offset | Size | Proposed type | Evidence "
+                          "| Confidence |",
+                          "| --- | --- | --- | --- | --- |"]
+                for f in fields:
+                    if isinstance(f, dict):
+                        lines.append("| " + " | ".join(_cell(f.get(k)) for k in
+                                ("offset", "size", "type", "evidence",
+                                 "confidence")) + " |")
+                    else:
+                        lines.append("| " + " | ".join(_cell(x) for x in
+                                (f, "", "", "", "")) + " |")
+            evidence = e.get("evidence") or []
+            if evidence:
+                lines += ["", "Evidence:"]
+                for v in evidence:
+                    lines.append(f"  - {v}")
+            lines.append("")
+    else:
+        lines += ["Nothing recorded in `structures.json` yet.", ""]
+    files["known-offsets.md"] = "\n".join(lines).rstrip() + "\n"
+
+    # -- the overview -----------------------------------------------------
+    report = gaps(ledger)
+    by_status: Dict[str, int] = {}
+    for e in everything_or_empty(ledger):
+        by_status[str(e.get("status"))] = by_status.get(str(e.get("status")), 0) + 1
+    lines = ["# Investigation state", "", GENERATED_BANNER, "",
+             "One source of truth: the ledger in `reconstruction/`. Everything",
+             "below is rendered from it, and `known-offsets.md`,",
+             "`known-formats.md`, `known-protocols.md`, `hypotheses.md` and",
+             "`dead-ends.md` are rendered from the same entries.", "",
+             "## Working with it", "",
+             "```sh",
+             "recon-ledger.py add ./reconstruction functions 0x8120 --evidence ...",
+             "recon-ledger.py validate ./reconstruction",
+             "recon-ledger.py gaps    ./reconstruction     # what is still open",
+             "recon-ledger.py render  ./reconstruction -o ./project-state/",
+             "```", "",
+             "## Counts by category", "",
+             "| Category | Entries |", "| --- | --- |"]
+    for category in LEDGER_KINDS:
+        lines.append(f"| {category} | {len(_entries_sorted(ledger, category))} |")
+    lines += ["", "## Counts by status", "", "| Status | Entries |",
+              "| --- | --- |"]
+    for status in sorted(by_status):
+        lines.append(f"| {status} | {by_status[status]} |")
+    counts = report["counts"]
+    lines += ["", "## Open", "",
+              f"- missing tests: {counts['missing_tests']}",
+              f"- hypotheses nobody can act on: "
+              f"{counts['unactionable_hypotheses']}",
+              f"- contradictions unresolved: "
+              f"{counts['unresolved_contradictions']}",
+              f"- assumptions other entries depend on: "
+              f"{counts['load_bearing_assumptions']}",
+              f"- categories never asked: {counts['empty_categories']}",
+              f"- entries with no recorded source: "
+              f"{counts['unsourced_entries']}",
+              f"- dead ends recorded: {counts['dead_ends']}", "",
+              "An empty category means the question was never asked, not that",
+              "it was answered.", ""]
+    files["investigation-state.md"] = "\n".join(lines).rstrip() + "\n"
+
+    return files
+
+
+def everything_or_empty(ledger: "Ledger") -> List[Dict]:
+    """Every entry in the ledger, skipping unreadable files rather than failing."""
+    out: List[Dict] = []
+    for category in LEDGER_KINDS:
+        out.extend(_entries_sorted(ledger, category))
+    return out
+
+
 def new_entry(name: str, kind: str, status: str = "unknown",
               confidence: Optional[str] = None,
               evidence: Optional[List[str]] = None,
@@ -458,6 +843,9 @@ def new_entry(name: str, kind: str, status: str = "unknown",
               notes: Optional[str] = None,
               supporting_observations: Optional[List[str]] = None,
               contradicting: Optional[List[str]] = None,
+              source: Optional[str] = None,
+              avoid: Optional[str] = None,
+              refuted_by: Optional[str] = None,
               **extra) -> Dict:
     """Build an entry with the shape the validator expects.
 
@@ -474,6 +862,12 @@ def new_entry(name: str, kind: str, status: str = "unknown",
     on and what argued against it. An entry recording only support is a summary
     of the case, not an audit of it, and the second list is the field that
     makes a stale claim catchable months later.
+
+    ``source`` records which layer produced the evidence, so a claim resting on
+    a runtime trace is not later defended as a static one.
+
+    ``avoid``, ``refuted_by`` and ``hypothesis`` are what a dead end needs to be
+    worth more than a line in a scratch file.
     """
     entry: Dict[str, Any] = {
         "name": name,
@@ -481,6 +875,12 @@ def new_entry(name: str, kind: str, status: str = "unknown",
         "status": status,
         "evidence": list(evidence or []),
     }
+    if source is not None:
+        entry["source"] = source
+    if avoid:
+        entry["avoid"] = avoid
+    if refuted_by:
+        entry["refuted_by"] = refuted_by
     if confidence is not None:
         entry["confidence"] = confidence
     if hypothesis:

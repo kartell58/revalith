@@ -89,6 +89,9 @@ def cmd_add(args) -> int:
             notes=args.note,
             supporting_observations=args.supporting,
             contradicting=args.contradicting,
+            source=args.source,
+            avoid=args.avoid,
+            refuted_by=args.refuted_by,
             address=args.address,
             related_functions=args.related_functions,
             related_data=args.related_data,
@@ -96,6 +99,33 @@ def cmd_add(args) -> int:
         )
     except Exception as e:                      # noqa: BLE001
         print(f"error: could not build entry: {e}", file=sys.stderr)
+        return 1
+
+    # Reopening a refuted idea is legitimate; reopening it silently is what
+    # wastes a day. The question is not "is this forbidden" but "is there
+    # something new", so a match demands --new-evidence rather than a refusal.
+    ledger = R.Ledger(args.ledger)
+    reopened: list = []
+    if args.category != "dead_ends" and os.path.isdir(ledger.root):
+        try:
+            reopened = R.find_reopened_dead_ends(
+                entry, ledger.read("dead_ends"), args.new_evidence)
+        except R.LedgerError:
+            reopened = []
+    blocking = [h for h in reopened if not h["has_new_evidence"]]
+    if blocking and not args.force:
+        print("error: this entry reopens a recorded dead end, and nothing "
+              "records what is new:", file=sys.stderr)
+        for h in blocking:
+            print(f"  - {h['dead_end']}: {h['matched_because']}", file=sys.stderr)
+            if h.get("refuted_by"):
+                print(f"      refuted by: {h['refuted_by']}", file=sys.stderr)
+            if h.get("avoid"):
+                print(f"      recorded as: {h['avoid']}", file=sys.stderr)
+        print("\nIf the test was inadequate, the tool was missing, or the code "
+              "changed, record that in --new-evidence. If the idea really is "
+              "dead, add the evidence that settled it instead.",
+              file=sys.stderr)
         return 1
 
     problems = R.validate_entry(entry, R.LEDGER_KINDS[args.category])
@@ -112,7 +142,6 @@ def cmd_add(args) -> int:
               "attached.", file=sys.stderr)
         return 1
 
-    ledger = R.Ledger(args.ledger)
     try:
         ledger.add(args.category, entry)
     except R.LedgerError as e:
@@ -124,13 +153,17 @@ def cmd_add(args) -> int:
         ledger.write(args.category, ledger.read(args.category))
 
     if args.json:
-        print(json.dumps({"added": entry, "problems": problems}, indent=2))
+        print(json.dumps({"added": entry, "problems": problems,
+                          "reopens_dead_end": reopened}, indent=2))
     else:
         print(f"added {args.category}/{args.name}  status={args.status}")
         if problems:
             print("recorded with problems:")
             for p in problems:
                 print(f"  ! {p}")
+        for h in reopened:
+            note = "" if h["has_new_evidence"] else " (forced)"
+            print(f"  note: reopens dead end '{h['dead_end']}'{note}")
     return 0
 
 
@@ -141,6 +174,8 @@ def cmd_update(args) -> int:
                          ("confidence", args.confidence),
                          ("hypothesis", args.hypothesis),
                          ("next_test", args.next_test),
+                         ("source", args.source),
+                         ("avoid", args.avoid),
                          ("notes", args.note)):
         if value is not None:
             changes[field] = value
@@ -154,11 +189,14 @@ def cmd_update(args) -> int:
         changes["supporting_observations"] = args.supporting
     if args.refuted_by:
         changes["refuted_by"] = args.refuted_by
+    if args.contradiction_resolved:
+        changes["contradiction_resolved"] = args.contradiction_resolved
 
     if not changes:
         print("error: nothing to change; pass at least one of --status, "
               "--confidence, --evidence, --tests, --hypothesis, --note, "
-              "--contradicting, --refuted-by", file=sys.stderr)
+              "--source, --supporting, --contradicting, --refuted-by, "
+              "--avoid", file=sys.stderr)
         return 2
 
     try:
@@ -243,8 +281,8 @@ def cmd_show(args) -> int:
         return 0
     for cat, e in matches:
         print(f"=== {cat}.json ===")
-        for key in ("name", "kind", "status", "confidence", "address",
-                    "hypothesis", "observed_behavior", "notes",
+        for key in ("name", "kind", "status", "confidence", "source", "address",
+                    "hypothesis", "observed_behavior", "notes", "avoid",
                     "contradiction_resolved", "refuted_by"):
             if e.get(key):
                 print(f"  {key:<18} {e[key]}")
@@ -354,6 +392,119 @@ def cmd_stats(args) -> int:
     return 0
 
 
+def cmd_gaps(args) -> int:
+    """What the ledger cannot yet answer.
+
+    The counter-question to `stats`. Stats says what has been found, which
+    makes a long investigation feel finished; this says what has not, which is
+    what decides the next hour of work.
+    """
+    ledger = R.Ledger(args.ledger)
+    if not ledger.exists():
+        print(f"error: no ledger at {args.ledger}; run `init` first",
+              file=sys.stderr)
+        return 1
+    report = R.gaps(ledger)
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        counts = report["counts"]
+        print(f"ledger: {report['ledger']}")
+        print(f"  entries                 {counts['entries']}")
+        print(f"  dead ends recorded      {counts['dead_ends']}")
+        print()
+        for key, title in (
+                ("missing_tests", "claims a status its tests do not support"),
+                ("unactionable_hypotheses",
+                 "hypotheses with nothing that could settle them"),
+                ("unresolved_contradictions",
+                 "evidence against a claim with no recorded answer"),
+                ("load_bearing_assumptions",
+                 "assumptions the rest of the work stands on")):
+            items = report[key]
+            print(f"{title} ({len(items)}):")
+            for item in items:
+                name = item.get("name")
+                cat = item.get("category")
+                detail = item.get("why") or item.get("risk") or ""
+                print(f"  - {name}" + (f"  [{cat}]" if cat else "")
+                      + (f"  -- {detail}" if detail else ""))
+            if not items:
+                print("  (none)")
+            print()
+        if report["empty_categories"]:
+            print("categories never asked (empty is not answered):")
+            for cat in report["empty_categories"]:
+                print(f"  - {cat}")
+            print()
+        if report["unsourced_entries"]:
+            print(f"entries with no recorded source ({len(report['unsourced_entries'])}):"
+                  " the layer that produced the evidence is unknown")
+            for item in report["unsourced_entries"][:20]:
+                print(f"  - {item.get('name')}  [{item.get('category')}]")
+            if len(report["unsourced_entries"]) > 20:
+                print(f"  ... and {len(report['unsourced_entries']) - 20} more")
+            print()
+        print(report["note"])
+
+    return 0 if report["clear"] or not args.strict else 1
+
+
+def cmd_render(args) -> int:
+    """Render the readable project-state files from the ledger.
+
+    Generated, never hand-edited: a second store of the same facts is how a
+    session ends up contradicting the ledger, with nothing noticing.
+    """
+    ledger = R.Ledger(args.ledger)
+    if not ledger.exists():
+        print(f"error: no ledger at {args.ledger}; run `init` first",
+              file=sys.stderr)
+        return 1
+    files = R.render_state(ledger)
+
+    if args.stdout:
+        if args.category and args.category not in files:
+            print(f"error: nothing is rendered as '{args.category}'; "
+                  f"renderable: {', '.join(sorted(files))}", file=sys.stderr)
+            return 1
+        name = args.category if args.category else "investigation-state.md"
+        print(files[name], end="")
+        return 0
+
+    try:
+        os.makedirs(args.output, exist_ok=True)
+    except OSError as e:
+        print(f"error: cannot create {args.output}: {e}", file=sys.stderr)
+        return 1
+
+    written = []
+    for name, text in sorted(files.items()):
+        path = os.path.join(args.output, name)
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except OSError as e:
+            # One unwritable file must not abandon the rest of the render.
+            print(f"warning: could not write {path}: {e}", file=sys.stderr)
+            continue
+        written.append(name)
+
+    if args.json:
+        print(json.dumps({"output": args.output, "written": written,
+                          "skipped": sorted(set(files) - set(written))},
+                         indent=2))
+    else:
+        print(f"rendered {len(written)} file(s) to {args.output}")
+        for name in written:
+            print(f"  {name}")
+        skipped = sorted(set(files) - set(written))
+        for name in skipped:
+            print(f"  SKIPPED {name}")
+    return 0 if len(written) == len(files) else 1
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description="Manage the reconstruction ledger.",
@@ -361,9 +512,11 @@ def main() -> int:
         epilog=__doc__)
     p.add_argument("command",
                    choices=["init", "add", "update", "list", "show",
-                            "validate", "stats"],
+                            "validate", "stats", "gaps", "render"],
                    help="init creates the ledger files; add/update change "
-                        "them; list/show/validate/stats read them")
+                        "them; list/show/validate/stats read them; gaps "
+                        "reports what is still open; render writes the "
+                        "readable project-state files from the ledger")
     p.add_argument("ledger", help="path to the reconstruction directory")
     # Neither positional carries argparse `choices`: for 'show' the second
     # positional is an entry name, and a name like 0x8120 would be rejected as
@@ -375,6 +528,17 @@ def main() -> int:
                    help="entry name (add, update)")
     p.add_argument("--status", choices=R.STATUSES, default=None)
     p.add_argument("--confidence", choices=R.CONFIDENCES, default=None)
+    p.add_argument("--source", choices=R.SOURCES, default=None,
+                   help="which layer produced the evidence: one of "
+                        + ", ".join(R.SOURCES))
+    p.add_argument("--avoid", default=None,
+                   help="what not to do next; required on a dead end, which "
+                        "without it is history rather than guidance")
+    p.add_argument("--new-evidence", default=None,
+                   help="what changed since a recorded dead end refuted "
+                        "this; reopening one without this is refused")
+    p.add_argument("--contradiction-resolved", default=None,
+                   help="how a recorded contradiction was answered")
     p.add_argument("--evidence", action="append", default=[],
                    help="an observation, with where it was seen "
                         "(repeatable)")
@@ -404,7 +568,15 @@ def main() -> int:
                    help="record an entry that fails validation, attaching "
                         "the problems to it")
     p.add_argument("--force", action="store_true",
-                   help="overwrite existing ledger files (init)")
+                   help="overwrite existing ledger files (init), or record "
+                        "an entry that reopens a dead end (add)")
+    p.add_argument("--strict", action="store_true",
+                   help="exit 1 when gaps remain (gaps)")
+    p.add_argument("-o", "--output", default="./project-state",
+                   help="directory to render into (render)")
+    p.add_argument("--stdout", action="store_true",
+                   help="print one rendered file instead of writing "
+                        "(render; name it as the category argument)")
     p.add_argument("--grep", default=None, help="substring filter (list)")
     p.add_argument("--verbose", "-v", action="store_true",
                    help="show hypotheses (list)")
@@ -439,6 +611,8 @@ def main() -> int:
         "show": cmd_show,
         "validate": cmd_validate,
         "stats": cmd_stats,
+        "gaps": cmd_gaps,
+        "render": cmd_render,
     }[args.command](args)
 
 

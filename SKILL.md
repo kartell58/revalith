@@ -196,6 +196,7 @@ with the measurements and the synthetic parts marked separately.
 | A protocol on the wire | capture bytes first | `references/protocols.md` |
 | Software you intend to rebuild | `universal-dump.py` | `reconstruction_candidates`, then `references/reconstruction.md` |
 | A running process, and a question about it | `memory-map.py <pid>` | `references/memory-runtime.md` |
+| Picking up an investigation already in progress | `recon-ledger.py gaps` | it names what is open, including unasked categories |
 
 `universal-dump.py` is an orchestrator, not an analyser. It identifies,
 collects, delegates, and ranks. It deliberately does not reimplement Ghidra,
@@ -239,12 +240,34 @@ Status is one of `unknown`, `observed`, `hypothesized`,
 validator refuses `verified` without a recorded test, and refuses a confidence
 above what the status can justify.
 
+The ledger is the **single store** of an investigation's state. The readable
+`project-state/` Markdown is rendered from it, because two stores of the same
+facts stop agreeing and nothing reports it:
+
+```sh
+scripts/recon-ledger.py gaps   ./reconstruction      # what is still open
+scripts/recon-ledger.py render ./reconstruction -o ./project-state/
+```
+
+`gaps` is the counter-question to `stats`: not what has been found, but what
+has not, including the categories nobody has asked about. An empty category is
+an unasked question, not an answered one.
+
+A hypothesis that turns out wrong moves to `dead_ends` with `refuted_by` and
+`avoid`, rather than being deleted — deleting it is indistinguishable from
+never having tried it. `add` refuses an entry that reopens a dead end without
+`--new-evidence`, so an idea can only come back with a reason.
+
 ### Verification is the part that is easy to skip
 
 ```sh
+scripts/determinism-check.py run1.json run2.json run3.json  # before comparing
 scripts/state-diff.py original.json mine.json --all-elements   # first divergence
 scripts/trace-diff.py original.log mine.log --context 4        # first divergence
 ```
+
+The first is a precondition: a difference the original produces against itself
+is a property of the target, not a fault in the reimplementation.
 
 Both locate the **first** divergence. Everything after it may be a consequence
 of it, so fixing the last mismatch in a log is fixing a symptom.
@@ -268,7 +291,8 @@ Standard-library Python 3. Each has `--help`; most support `--json`.
 | `compare-symbols.py` | Diff symbols/imports/exports between two builds. |
 | `function-signatures.py` | Infer probable signatures from register usage. Labelled inference. |
 | `dump-diff.py` | Compare two `universal-dump.py` reports. |
-| `recon-ledger.py` | The reconstruction ledger: status, evidence, confidence, validation. |
+| `recon-ledger.py` | The reconstruction ledger: status, evidence, confidence, validation. `gaps` reports what is still open; `render` writes the readable project-state files. |
+| `determinism-check.py` | Establish whether the original produces the same observation twice, and name the fields that vary. |
 | `state-diff.py` | Compare observable state; locate the first divergence; candidate causes. |
 | `trace-diff.py` | Compare call traces; locate the first divergence in the sequence. |
 | `memory-map.py` | Read and classify a memory map; group modules; derive load bias. |
@@ -288,7 +312,7 @@ reconstruction scripts, `_runtimelib.py` for the memory and runtime ones, and
 Verify the parsers at any time:
 
 ```sh
-python3 scripts/selftest.py     # 529 checks, offline, no tools required
+python3 scripts/selftest.py     # 592 checks, offline, no tools required
 ```
 
 Quick start:
@@ -302,6 +326,13 @@ scripts/dump-diff.py dump-v1/report.json dump-v2/report.json
 
 # reconstruction
 scripts/recon-ledger.py init ./reconstruction          # start a ledger
+scripts/recon-ledger.py add ./reconstruction dead_ends "LZ4 payload" \
+    --status refuted --evidence "lz4 -d: bad magic" \
+    --hypothesis "the payload is LZ4" --refuted-by "decoders disagree" \
+    --avoid "measure entropy first"
+scripts/recon-ledger.py gaps ./reconstruction           # what is still open
+scripts/recon-ledger.py render ./reconstruction -o ./project-state/
+scripts/determinism-check.py run1.json run2.json run3.json
 scripts/state-diff.py original.json mine.json --all-elements
 scripts/trace-diff.py original.log mine.log --detail
 

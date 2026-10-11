@@ -1,5 +1,12 @@
 # Dead ends
 
+> **Reference format, not the live copy.** The files here show what the
+> readable views look like. The working copies in an investigation are
+> generated from the ledger by `recon-ledger.py render`, which
+> overwrites them: edit `reconstruction/*.json`, then re-render.
+> A hand-edited copy and the ledger disagree silently, and the one that
+> is checked first is the one that was wrong.
+
 Hypotheses that were tested and did not survive. Write the entry **as soon as
 the hypothesis is refuted**, with enough detail that the next session can tell
 the test was adequate rather than merely abandoned.
