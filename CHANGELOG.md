@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Versions are for the skill, not for a target being analysed.
 
+## [4.0.0] — 2026-10-11
+
+Memory and runtime intelligence added as a third layer, alongside static
+analysis and reconstruction. The skill could already hook a function; what it
+could not do was say where a value lived, which thread wrote it, or how a
+runtime address relates to a file offset.
+
+Added `references/memory-runtime.md` — the methodology for investigating a
+running process: memory maps and region classification, the address spaces and
+the load bias, processes and module loading, threads, call stacks, memory
+writes and provenance, heap and allocation, object lifetime, pointer and alias
+analysis, syscalls and protection changes, signals and crashes, breakpoints
+and watchpoints, the Android JNI and ART runtime, runtime/static correlation,
+runtime differential analysis, and state reconstruction.
+
+Added six scripts, each with one responsibility:
+
+| Script | Purpose |
+| --- | --- |
+| `memory-map.py` | Read and classify a memory map; group modules; derive load bias |
+| `normalize-address.py` | Translate a runtime address through module, ELF and file spaces, or explain why it cannot |
+| `runtime-events.py` | The runtime event schema: validate, summarise, filter, provenance |
+| `stack-groups.py` | Normalise and group call stacks; hot paths, rare paths, two-run comparison |
+| `correlate-runtime.py` | Join runtime events to static analysis; thread table; capabilities |
+| `diff-runtime.py` | Compare two runtime traces; locate the first divergence |
+
+And `_runtimelib.py`, the shared library behind them, following the existing
+`_`-prefix convention.
+
+### A correctness fix that the layer depended on
+
+The naive `runtime_address - module_base` translation, which most tooling
+uses, was wrong for any module whose `PT_LOAD` segments carry different
+vaddr/offset skews — which is most of them. A module mapping three segments at
+skews of `0`, `0x4000` and `0x8000` yields three different "load biases", and
+the usual result is that data-section addresses are read as code-section
+addresses, producing plausible and wrong symbols.
+
+Translation now derives from the file offset and the segment table, which needs
+no bias and cannot be wrong because of one. The bias is computed from the
+segment table and used only as a cross-check, with disagreement reported rather
+than propagated. The selftest ELF fixture gained real program headers and a
+`load_base` parameter, since a fixture where vaddr equals file offset cannot
+test load-bias derivation at all.
+
+### Discipline kept explicit
+
+- Region classification carries the basis for its claim. An anonymous writable
+  region is not a heap without a kernel name, a kernel hint or observed growth.
+- An anonymous executable region is reported as that. Calling it JIT, an
+  unpacker or a patcher is a reading and is labelled one.
+- A protection change is a fact; its reason is not, and `mprotect` alone is
+  never evidence of anti-tampering.
+- A `caused_by` field with no recorded experiment is rejected by the schema.
+  That is the field where an inference becomes a fact.
+- A missing observation is reported as a gap in the trace, never as an absence
+  of behaviour.
+- A `.bss` address gets a bss offset and its variable's symbol, not an
+  invented file offset.
+
+Added `examples/runtime-state-hunt.md`, the whole sequence end to end on a
+small native fixture: process, modules, memory map, address translation,
+event trace, provenance, differential run, and a state model recorded at low
+confidence with its counter-evidence. The measurements and the synthetic parts
+are marked separately, and the example closes with what it does not establish.
+
+Selftest grew from 283 to 519 checks, all offline and deterministic, including
+a fixture built so that load-bias arithmetic is genuinely exercised.
+
+Cross-links added from `dynamic-analysis.md`, `frida.md`, `gdb.md`, `lldb.md`,
+`elf.md`, `android.md`, `binary-diff.md`, `reconstruction.md`, `tooling.md`
+and `investigation-state.md`. Runtime tool groups (`syscall_tracer`,
+`profiler`, `memcheck`, `emulator`) added to capability detection.
+
 ## [3.0.0] — 2026-10-06
 
 Software reconstruction added as a first-class capability, taking the skill

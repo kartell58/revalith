@@ -33,6 +33,13 @@ Interceptor.attach(fn, { ... });
 This is the single most common Frida mistake. `Module.getBaseAddress` is the
 older API; `Process.getModuleByName(...).base` is current.
 
+For the reverse direction — turning an address from a crash or a log back
+into a function — `module.base.add(...)` is the same arithmetic in reverse,
+and `scripts/normalize-address.py` does it properly against a saved memory map.
+That matters because `runtime - base` is a module-relative offset and **not** a
+file offset: several offsets land in the right function and the wrong byte.
+See `memory-runtime.md`.
+
 On Android, spawn and wait for the module to load, because the library may not
 exist at injection time:
 

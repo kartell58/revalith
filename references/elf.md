@@ -80,6 +80,29 @@ The GOT holds addresses that must be resolved by the loader. Because of
 lazy binding, a GOT entry often points back into the PLT until first call.
 This is normal, not a sign of tampering.
 
+## From a runtime address back to a segment
+
+`p_vaddr` is what the symbol table uses; what an instruction pointer holds at
+runtime is that plus a load bias. `runtime_address - module_base` recovers
+neither reliably.
+
+A module maps at several file offsets, so `module_base` is usually the header
+page rather than the code — and each `PT_LOAD` can carry a different
+`p_vaddr - p_offset` skew. For a mapping at file offset `O` starting at `S`,
+the bias is `S - p_vaddr + p_offset - O`; keeping the segment's own terms is
+what makes every segment of one module agree.
+
+The exact route from a runtime address runs the other way. The map says which
+file offset the bytes are at, and the segment table says what virtual address
+that offset is. No bias is needed, and so there is no bias to get wrong. A
+`.bss` address — inside `memsz`, past `filesz` — has no file offset at all, and
+the correct answer is the bss offset plus the variable's symbol, not a number
+invented from the base.
+
+`memory-runtime.md` covers the whole translation;
+`scripts/normalize-address.py` performs it and reports a status and a reason
+for every case it cannot.
+
 ## Relocations
 
 `readelf -r` shows how the loader patches the file. Relocations are how you

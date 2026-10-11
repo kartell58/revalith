@@ -73,14 +73,28 @@ installed rather than installing a new one mid-investigation.
 | `frida` | Instrument without recompiling; cross-process; hook by symbol |
 | `strace` | Syscall behaviour, file/network access |
 | `ltrace` | Library call interception |
+| `perf` | Sampling profiles, when a debugger would distort timing |
+| `valgrind` | Memory errors and allocation tracking without a rebuild |
 | `/proc/<pid>/` | Module maps, memory maps, when ptrace is restricted |
 
-`/proc` deserves special mention: `/proc/<pid>/maps` gives the load base
-needed to convert a static address to a runtime one, and `/proc/<pid>/mem`
-allows reads where ptrace is blocked. Both need permission, and both are
-frequently restricted.
+`/proc` deserves special mention, because it is the one capability that needs
+no debugger at all: `/proc/<pid>/maps` gives the regions and the load base,
+`/proc/<pid>/smaps` adds the kernel's own account of what each region is for,
+and `/proc/<pid>/mem` allows reads where ptrace is blocked. Both need
+permission, and both are frequently restricted.
 
-See `dynamic-analysis.md` for preconditions and fallbacks.
+Two distinctions that keep costing time when they are blurred:
+
+**Tool presence is not permission.** A debugger that cannot attach is no
+better than an absent one. Check `/proc/sys/kernel/yama/ptrace_scope`, and
+whether the target is yours.
+
+**Absence reduces what can be observed; it never changes what is evidence.**
+With no syscall tracer, the honest statement is "the syscall layer was not
+observed", not "no syscalls occurred".
+
+See `dynamic-analysis.md` for preconditions and fallbacks, and
+`memory-runtime.md` for what each capability actually yields.
 
 ## Choosing by question
 

@@ -64,9 +64,25 @@ and can be refuted by a test. See
 | Static tools | `readelf`, `objdump`, `llvm-readobj`, `nm`, `strings`, `ldd` |
 | RE suites | Ghidra, radare2/rizin, Cutter, Binary Ninja |
 | Dynamic tools | gdb, lldb, Frida, strace, ltrace, `/proc` |
+| Memory & runtime | memory maps, address spaces and ASLR, threads, call stacks, allocation and object lifetime, syscalls, signals and crashes, JNI runtime, provenance |
 | Analysis | signatures, structures, call graphs, xrefs, binary diffing |
 | Workflow | automated triage, long-running investigation state |
 | Reconstruction | semantic and behavioural modelling, reconstruction ledger, differential testing, reimplementation, porting |
+
+## The chain it follows
+
+The layers are not independent techniques; each one consumes what the
+previous one established. The chain is the point:
+
+```
+binary  →  code  →  memory  →  runtime  →  behaviour  →  state
+       →  protocol  →  semantics  →  model  →  reconstruction
+```
+
+A worked pass over that chain, on a small native fixture, is in
+[examples/runtime-state-hunt.md](examples/runtime-state-hunt.md) — from a
+running process to a verified state model, with the measurements and the
+synthetic parts marked separately.
 
 ## Install
 
@@ -145,6 +161,40 @@ python3 scripts/state-diff.py original.json mine.json --all-elements
 python3 scripts/trace-diff.py original.log mine.log --detail
 ```
 
+### Memory & runtime tools
+
+```sh
+# what does this process actually have mapped? (no process needed for a file)
+python3 scripts/memory-map.py 1234 --smaps
+python3 scripts/memory-map.py --map-file saved.maps --modules-only
+
+# turn a runtime address into a function. runtime - base is NOT a file offset
+python3 scripts/normalize-address.py 0x7f1a40001234 \
+    --map-file maps.txt --binary ./libfoo.so
+
+# validate the evidence before interpreting it
+python3 scripts/runtime-events.py trace.json --validate
+
+# who writes this address, and from where?
+python3 scripts/correlate-runtime.py trace.json --write-to 0x7ffd1a2b0410 \
+    --map-file maps.txt --binary ./libfoo.so
+
+# which stacks recur, and which are rare paths?
+python3 scripts/stack-groups.py backtraces.txt --detail 5
+
+# where do two runs first differ?
+python3 scripts/diff-runtime.py baseline.json modified.json --detail
+```
+
+`normalize-address.py` is the one worth having. A runtime address is
+meaningless until it is joined to a file offset, and the shortcut everybody
+reaches for — `runtime_address - module_base` — is wrong whenever a module maps
+at several file offsets or its segments carry different vaddr/offset skews. The
+tool walks the segment table instead, uses the load bias only as a
+cross-check, and refuses with a reason when the translation cannot be made
+safely. A `.bss` address gets its bss offset and its symbol, not an invented
+file offset.
+
 `recon-ledger.py` is the part worth having. Status is one of `unknown`,
 `observed`, `hypothesized`, `partially-reconstructed`, `reconstructed`,
 `verified`, `refuted`, and the validator enforces what each status requires:
@@ -182,12 +232,13 @@ evidence recorded.
 ### Verifying the parsers
 
 ```sh
-python3 scripts/selftest.py     # 283 checks, offline, no tools required
+python3 scripts/selftest.py     # 519 checks, offline, no tools required
 ```
 
 Generates ELF, PE, Mach-O, APK and AXML fixtures whose exact contents it
 knows, then asserts on what the parsers extract. If you modify `_binlib.py`,
-`_reconlib.py` or anything in `scripts/dumpers/`, run it first.
+`_reconlib.py`, `_runtimelib.py` or anything in `scripts/dumpers/`, run it
+first.
 
 ## How the workflow behaves
 
@@ -238,14 +289,14 @@ revalith/
 ├── CONTRIBUTING.md          how to propose changes
 ├── SECURITY.md              reporting and scope of acceptable use
 ├── .gitignore
-├── references/              25 files — loaded on demand, never all at once
+├── references/              26 files — loaded on demand, never all at once
 │   ├── methodology.md       evidence loop, confidence, reporting
 │   ├── tooling.md           tool selection, environment probing, fallbacks
 │   ├── investigation-state.md  dead ends, hypotheses, versioned offsets
 │   ├── elf.md  pe.md  macho.md  android.md  web-re.md
 │   ├── arm64.md  arm32.md  x86.md
 │   ├── ghidra.md  radare2.md  binary-ninja.md
-│   ├── dynamic-analysis.md  frida.md  gdb.md  lldb.md
+│   ├── dynamic-analysis.md  memory-runtime.md  frida.md  gdb.md  lldb.md
 │   ├── binary-diff.md
 │   ├── protocols.md
 │   └── reconstruction.md  semantic-modeling.md  behavioral-analysis.md
@@ -257,17 +308,24 @@ revalith/
 │   ├── recon-ledger.py      the reconstruction ledger
 │   ├── state-diff.py        observable state comparison
 │   ├── trace-diff.py        call trace comparison
+│   ├── memory-map.py        memory map, regions, modules, load bias
+│   ├── normalize-address.py runtime address -> module / ELF / file offset
+│   ├── runtime-events.py    runtime event schema and summary
+│   ├── stack-groups.py      call stack normalisation and grouping
+│   ├── correlate-runtime.py runtime <-> static correlation, provenance
+│   ├── diff-runtime.py      compare two runtime traces
 │   ├── elf-summary.py  strings-map.py  find-xrefs.py
 │   ├── compare-symbols.py   function-signatures.py
 │   ├── _binlib.py           ELF/PE/Mach-O parsers
 │   ├── _weblib.py           web parsing helpers
 │   ├── _reconlib.py         ledger, trace and divergence logic
+│   ├── _runtimelib.py       maps, address spaces, events, stacks, provenance
 │   ├── dumpers/             internal orchestrator modules (_-prefixed)
 │   └── selftest.py          offline tests
 ├── templates/
 │   ├── project-state/       dead-ends, formats, offsets, protocols, hypotheses
 │   └── reconstruction/      8 ledgers plus the schema they follow
-└── examples/                17 end-to-end worked investigations
+└── examples/                18 end-to-end worked investigations
 ```
 
 `SKILL.md` stays short on purpose. Specialised knowledge lives in `references/`
@@ -282,6 +340,7 @@ and is loaded only when the question needs it.
 - **[analyze-android-apk.md](examples/analyze-android-apk.md)** — APK triage, manifest, JNI bridge
 - **[analyze-unity-il2cpp.md](examples/analyze-unity-il2cpp.md)** — Unity/IL2CPP detection, metadata, obfuscated case
 - **[trace-function.md](examples/trace-function.md)** — settle one function with a debugger or Frida
+- **[runtime-state-hunt.md](examples/runtime-state-hunt.md)** — running process to a verified state model, end to end
 - **[find-protocol-handler.md](examples/find-protocol-handler.md)** — string or opcode to parser and handler
 - **[compare-versions.md](examples/compare-versions.md)** — two builds to testable hypotheses
 - **[compare-binaries.md](examples/compare-binaries.md)** — artefact diff vs behavioural diff

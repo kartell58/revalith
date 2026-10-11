@@ -165,3 +165,24 @@ a dead end retried.
 The state files are working notes. When the investigation concludes, the
 durable output is the report; the state directory is scaffolding and can be
 discarded.
+
+## Runtime observations in the state
+
+A runtime finding is worth recording with the same care as a static one, and
+it brings two fields a static finding does not have: the **thread**, and the
+**version of the build the address was taken from**.
+
+- A write with no tid cannot be attributed, and under concurrency the
+  attribution is usually the point.
+- A runtime address is meaningless in the state file. Record
+  `module+0xoffset`, which survives ASLR, and note the module base separately
+  if the map is saved.
+- Record whether the observation came from a saved map, a debugger, or an
+  in-process hook. `memory-map.py` reading a file and a watchpoint under a
+  debugger are not the same evidence, and only one of them perturbs the run.
+
+A hypothesis that came from runtime correlation needs its experiment recorded
+beside it. "0x1400 ran and then the field changed" is a correlation; the
+experiment that makes it a cause is a separate entry, and until it runs the
+claim stays a hypothesis. `scripts/runtime-events.py --validate` rejects the
+`caused_by` field without one.

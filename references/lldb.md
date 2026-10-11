@@ -114,3 +114,22 @@ On macOS and iOS it is the native choice with the better device story. On
 Linux the two are close to equivalent — pick whichever is installed. The
 skills that matter (read registers, break on a condition, dump memory,
 script the session) are identical in both.
+
+## Where LLDB differs from GDB
+
+The commands are close enough that habits transfer, and the exceptions are
+where they do not:
+
+| Task | GDB | LLDB |
+| --- | --- | --- |
+| Memory address as a watchpoint | `watch *(int*)0x…` | `watch -l *(int*)0x…` |
+| Apply to all threads | `set scheduler-locking off` (default) | `settings set target.process.stop-on-sharedlibrary-events false` |
+| Call a function | `call f(x)` | `expr f(x)` |
+| Process list | `info threads` | `thread list` |
+| Register dump | `info registers` | `register read` |
+| Record execution | `record full` | `process record start` |
+
+Watchpoints exist in both and have the same limits: a small number of
+hardware slots, access-width granularity, and any thread can trigger one. See
+`gdb.md` for the watchpoint section and `memory-runtime.md` for what to do
+with the events a watchpoint produces.

@@ -201,7 +201,13 @@ Practical, end to end:
 - `examples/reconstruct-function.md` — one function, evidence to model
 - `examples/reconstruct-structure.md` — recovering a layout
 - `examples/reconstruct-state-machine.md` — states from traces
+- `examples/runtime-state-hunt.md` — running process to a verified state model
 - `examples/reconstruct-protocol.md` — wire format to independent client
 - `examples/differential-testing.md` — locating and explaining a divergence
 - `examples/reconstruct-legacy-game.md` — end to end on synthetic legacy software
+
+Runtime evidence feeds the ledger like any other observation: a memory write
+with a thread, a call site and a value is an entry with evidence, and it
+becomes `verified` only once a test has been run. `memory-runtime.md` covers
+the layer and `scripts/recon-ledger.py` enforces the same rules on it.
 - `examples/reimplement-subsystem.md` — model to working subsystem

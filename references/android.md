@@ -122,6 +122,12 @@ The runtime. `libart.so` implements it. Relevant behaviours:
 
 If native breakpoints behave inconsistently, this is usually the reason.
 
+An oat or `.vdex` mapping is still a module: it has a base and a load bias
+like any other, so a native frame in a backtrace resolves the same way.
+`memory-runtime.md` covers that translation, and `android.md`'s native loading
+section covers which library the implementation is in at all — `RegisterNatives`
+hides it behind a table with no exported name to find.
+
 ## Native crash reports
 
 `tombstones` under `/data/tombstones/` and logcat both carry native backtraces

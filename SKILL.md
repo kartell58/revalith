@@ -1,6 +1,6 @@
 ---
 name: Revalith
-description: Investigate binaries, mobile apps, web targets, protocols and native code with evidence-driven static and dynamic analysis.
+description: Investigate binaries, mobile apps, web targets, protocols and native code with evidence-driven static and dynamic analysis, including memory maps, address translation, threads, call stacks and runtime state reconstruction.
 metadata:
   opencode/autoinvoke: true
 ---
@@ -39,6 +39,11 @@ Verification          prove: the two agree
         ↓
 Porting               adapt: it works somewhere else
 ```
+
+Running, not just compiled, is what makes observation decisive. Memory and
+runtime evidence answers what the static view cannot: which thread executed
+this, which address changed, what event triggered it. It is a second axis of
+the same ladder, not a separate discipline — see `references/memory-runtime.md`.
 
 Decompilation is not reconstruction. A decompiler gives you C that runs;
 reconstruction gives you a model you can test, and each claim in that model
@@ -92,16 +97,92 @@ Adaptive, not a checklist. Moving backwards is expected, not a failure.
 13. **Infer structures** — offsets, not invented field names.
 14. **Compare versions** — when another build exists.
 15. **Dynamic analysis** — when static analysis stops being decisive.
-16. **Hook and trace** — observe real arguments and returns.
-17. **Test hypotheses** — design a test that could refute.
-18. **Confirm or refute** — and say which.
-19. **Record state** — so this work is not repeated. See `investigation-state.md`.
-20. **Document** — evidence, hypothesis, test, conclusion, confidence.
-21. **Reconstruct, if the question calls for it** — model, implement, and
+16. **Map memory and runtime** — regions, modules, threads, addresses. When
+    the question is about what actually happens. `references/memory-runtime.md`.
+17. **Hook and trace** — observe real arguments, returns and memory writes.
+18. **Test hypotheses** — design a test that could refute.
+19. **Confirm or refute** — and say which.
+20. **Record state** — so this work is not repeated. See `investigation-state.md`.
+21. **Document** — evidence, hypothesis, test, conclusion, confidence.
+22. **Reconstruct, if the question calls for it** — model, implement, and
     verify. See `references/reconstruction.md`.
 
 A static finding that produces an unexpected runtime value sends you back to
 step 11, not forward.
+
+## Memory and runtime intelligence
+
+Step 16, expanded. Static analysis tells you what the code *can* do; only
+runtime evidence tells you what it *does*, on which thread, writing which
+memory. Three failures separate a useful runtime investigation from a
+plausible one, and the whole layer exists to prevent them.
+
+**`runtime_address - module_base` is not a file offset.** A module maps at
+several file offsets — the lowest is usually the header page, not the code —
+and its segments can carry different vaddr/offset skews, so the shortcut
+yields several different answers at once. Derive from the file offset and the
+segment table; use the load bias only as a cross-check, and treat a
+disagreement as a finding.
+
+```sh
+scripts/normalize-address.py 0x7f1a40001234 --map-file maps.txt --binary ./libfoo.so
+```
+
+**Classification needs a basis.** An anonymous writable region is not a heap.
+It becomes one because the kernel labelled it `[heap]`, or `smaps` reports
+`mg`, or it grew between two samples — and the basis travels with the claim.
+An anonymous executable region is a fact; calling it JIT, an unpacker or a
+patcher is a reading, and one protection change is not evidence of
+anti-tampering.
+
+**Correlation is not causation.** `function_A executed` then `field_X changed`
+proves nothing: another thread, a callback, a signal, or a shared write can be
+responsible. `runtime-events.py` rejects a `caused_by` field with no recorded
+experiment, because that is where an inference becomes a fact.
+
+### When it is the right layer
+
+| The question | Runtime gives you |
+| --- | --- |
+| where is this value stored | the address, its region, and whether it has a file offset |
+| who writes it | the thread, the call site, the value, the interval |
+| which thread does this | the tid, correlated with the stack and the memory |
+| what is the call path | frames normalised to `module+0xoffset` when symbols are gone |
+| what is the process actually loading | modules absent from `DT_NEEDED` |
+| where did it crash | the site — which is not the cause |
+| what changed between two builds | the first differing event, not a list of differences |
+| how is this state reached | a state machine, with each transition evidenced |
+
+```sh
+scripts/memory-map.py <pid> --smaps --json      # regions, modules, load bias
+scripts/runtime-events.py trace.json --validate  # the schema, before the analysis
+scripts/correlate-runtime.py trace.json --write-to 0x7ffd1a2b0410
+scripts/stack-groups.py backtraces.txt --detail 5
+scripts/diff-runtime.py baseline.json modified.json --detail
+```
+
+Everything degrades honestly: a saved `maps` file needs no process, a stripped
+binary yields `module+0xoffset`, and a missing tool is reported as unavailable
+rather than assumed. `examples/runtime-state-hunt.md` is the whole sequence,
+with the measurements and the synthetic parts marked separately.
+
+### How it meets the rest
+
+- **Static analysis** — the other half of every address. A runtime address is
+  meaningless until it is joined to a file offset, and the join is where a
+  wrong bias would mislead everything after it.
+- **Dynamic analysis** — the general technique. This layer is what to look at:
+  a specific map, a specific thread, a specific address.
+- **Frida / GDB / LLDB** — the instruments. This layer decides where to point
+  them and reads what they record. See `frida.md`, `gdb.md`, `lldb.md`.
+- **Android** — JNI registration, `dlopen`, ART's oat, thread names.
+- **Binary diff** — address changed, implementation changed and behaviour
+  changed are three different findings, and only runtime evidence separates
+  the last two. See `binary-diff.md`.
+- **Reconstruction** — the runtime state model *is* the behavioural model,
+  and a memory field is a reconstructed structure with evidence.
+- **Investigation graph** — runtime observations enter the ledger as entries
+  like any other, with the same requirement for a test before `verified`.
 
 ## Choosing where to start
 
@@ -114,6 +195,7 @@ step 11, not forward.
 | Two builds of the same thing | `universal-dump.py` ×2, then `dump-diff.py` | `references/binary-diff.md` |
 | A protocol on the wire | capture bytes first | `references/protocols.md` |
 | Software you intend to rebuild | `universal-dump.py` | `reconstruction_candidates`, then `references/reconstruction.md` |
+| A running process, and a question about it | `memory-map.py <pid>` | `references/memory-runtime.md` |
 
 `universal-dump.py` is an orchestrator, not an analyser. It identifies,
 collects, delegates, and ranks. It deliberately does not reimplement Ghidra,
@@ -128,6 +210,7 @@ one you are in:
 | The request says | Phase | You owe |
 | --- | --- | --- |
 | "understand", "what does this do", "how does it work" | analysis | an explanation with evidence |
+| "where is this value stored", "which thread writes it", "what happens at runtime" | analysis → runtime | the address, the thread, the writer, the evidence |
 | "what subsystem is this", "where is the collision code" | analysis → reconstruction | a model with per-claim confidence |
 | "reconstruct", "model", "what are its parts" | reconstruction | a model in the ledger, tested where possible |
 | "reimplement", "clone", "write my own", "compatible" | reconstruction → reimplementation | working code **and** a verification argument |
@@ -188,17 +271,24 @@ Standard-library Python 3. Each has `--help`; most support `--json`.
 | `recon-ledger.py` | The reconstruction ledger: status, evidence, confidence, validation. |
 | `state-diff.py` | Compare observable state; locate the first divergence; candidate causes. |
 | `trace-diff.py` | Compare call traces; locate the first divergence in the sequence. |
+| `memory-map.py` | Read and classify a memory map; group modules; derive load bias. |
+| `normalize-address.py` | Translate a runtime address through module, ELF and file spaces — or say why it cannot. |
+| `runtime-events.py` | Validate, summarise and filter runtime event records; provenance per address. |
+| `stack-groups.py` | Normalise and group call stacks; hot paths, rare paths, two-run comparison. |
+| `correlate-runtime.py` | Join runtime events to static analysis; thread table; provenance; capabilities. |
+| `diff-runtime.py` | Compare two runtime traces; locate the first divergence. |
 
 `scripts/dumpers/` holds the internal modules the orchestrator uses
 (`_formats`, `_indicators`, `_binaries`, `_android`, `_unity`, `_archives`,
 `_assets`, `_report`, `_tools`). They are prefixed `_` because they are not
 command-line tools. `_reconlib.py` is the shared library for the
-reconstruction scripts, and `_weblib.py` for the web ones.
+reconstruction scripts, `_runtimelib.py` for the memory and runtime ones, and
+`_weblib.py` for the web ones.
 
 Verify the parsers at any time:
 
 ```sh
-python3 scripts/selftest.py     # 283 checks, offline, no tools required
+python3 scripts/selftest.py     # 519 checks, offline, no tools required
 ```
 
 Quick start:
@@ -214,6 +304,12 @@ scripts/dump-diff.py dump-v1/report.json dump-v2/report.json
 scripts/recon-ledger.py init ./reconstruction          # start a ledger
 scripts/state-diff.py original.json mine.json --all-elements
 scripts/trace-diff.py original.log mine.log --detail
+
+# memory and runtime
+scripts/memory-map.py 1234 --smaps --json
+scripts/normalize-address.py 0x7f1a40001234 --map-file maps.txt --binary ./libfoo.so
+scripts/correlate-runtime.py trace.json --write-to 0x7ffd1a2b0410 --map-file maps.txt
+scripts/diff-runtime.py baseline.json modified.json --detail
 ```
 
 ## References
@@ -230,7 +326,9 @@ reporting), `tooling.md` (tool selection, probing, fallbacks),
 
 **Tools** — `ghidra.md`, `radare2.md`, `binary-ninja.md`
 
-**Dynamic** — `dynamic-analysis.md`, `frida.md`, `gdb.md`, `lldb.md`
+**Dynamic** — `dynamic-analysis.md`, `memory-runtime.md` (memory maps, address
+spaces, threads, provenance, runtime differential analysis), `frida.md`,
+`gdb.md`, `lldb.md`
 
 **Comparison** — `binary-diff.md`
 
@@ -253,6 +351,7 @@ Analysis:
 - `analyze-unity-il2cpp.md` — Unity/IL2CPP detection, metadata, obfuscated case
 - `universal-dump.md` — automated triage and reading its ranking
 - `trace-function.md` — settle one function with a debugger or Frida
+- `runtime-state-hunt.md` — running process to a verified state model, end to end
 - `find-protocol-handler.md` — string or opcode to parser and handler
 - `compare-versions.md` — two builds to testable hypotheses
 - `compare-binaries.md` — two targets, artefact diff vs behavioural diff
@@ -298,6 +397,21 @@ unknown architecture, restricted process access, protected IL2CPP metadata,
 CDN-proxied origins. Any of these can make a technique inapplicable. Check
 preconditions before promising a technique will work; state them when they will
 not.
+
+Runtime evidence inherits those limits and adds its own:
+
+- **The map is a snapshot.** A library loaded and unloaded between two reads is
+  invisible. Hook the load rather than polling the map.
+- **Instrumentation changes what it measures.** A hook on a hot path changes
+  timing, scheduling and sometimes the outcome. Report that it was observed
+  under instrumentation.
+- **A watchpoint is not free and not unlimited.** Hardware slots are few,
+  granularity is the access width, and every thread can trigger it.
+- **A missing observation is a gap in the trace**, not an absence of
+  behaviour. The two look identical, which is why the tools report the gap.
+- **Tool presence is not permission.** A debugger that cannot attach, and a
+  `/proc` entry you cannot read, are both no evidence at all — not weak
+  evidence.
 
 Reconstruction inherits those limits and adds its own. These cannot be
 reconstructed in general, and the answer is to say so:

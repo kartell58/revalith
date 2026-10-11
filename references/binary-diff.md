@@ -124,6 +124,13 @@ Ranked by how informative a difference is:
 | Changed string, no new code | Reworded message or moved data |
 | Address change only | Rebuild noise |
 
+An address that changed, an implementation that changed and a behaviour that
+changed are three different findings, and only two runs of the thing can tell
+them apart. `scripts/diff-runtime.py` compares two traces and locates the
+first divergence; `memory-runtime.md` has the method. A build that produces the
+same event sequence with different values at the same points has changed
+behaviour, which no symbol or byte diff would have shown.
+
 ## Pitfalls
 
 - **Comparing different builds of dependencies.** Diff the target, not its

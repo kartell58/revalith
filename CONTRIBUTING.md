@@ -78,6 +78,34 @@ Two rules specific to this area:
   the test that would settle each. A tool that recommends `round()` instead of
   truncation because the output matched is worse than no tool.
 - **A status change must be recorded, not overwritten.** `Ledger.update`
+
+### Adding memory & runtime functionality
+
+Runtime logic goes in `scripts/_runtimelib.py`; the CLIs (`memory-map.py`,
+`normalize-address.py`, `runtime-events.py`, `stack-groups.py`,
+`correlate-runtime.py`, `diff-runtime.py`) stay thin. If a change alters what
+the event schema accepts, it must also add a `selftest.py` case that
+demonstrates the rejection — the value of the validator is entirely in the
+things it refuses.
+
+Four rules specific to this area, each of which exists because the shortcut it
+forbids is the obvious one:
+
+- **Never translate an address without walking the segment table.**
+  `runtime_address - module_base` is wrong for any module whose `PT_LOAD`
+  segments carry different vaddr/offset skews, and it is wrong silently: the
+  result is a real address in the wrong section. Derive from the file offset,
+  use the bias as a cross-check, and report a disagreement.
+- **Never classify a region without a basis.** A kernel name, a kernel hint
+  from `smaps`, a file, an observed growth — pick one and carry it. An
+  anonymous writable region is not a heap, and an anonymous executable region
+  is not a JIT.
+- **Never emit a causal claim from observation.** Two events near each other in
+  time are not one causing the other. The schema rejects `caused_by` without a
+  recorded experiment; keep that.
+- **Never report a gap as an absence.** A stage with no evidence means the
+  trace did not record it, which looks exactly like behaviour that does not
+  exist. Say which one it is.
   appends to `history` so a superseded claim stays visible. Do not clear it.
 
 Style: readable over clever, comments explaining *why* rather than *what*, and

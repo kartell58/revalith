@@ -131,3 +131,29 @@ gdb -q ./app /path/to/core
   a property of the target.
 - Ctrl-C interrupts; `set confirm off` avoids prompts in scripts.
 - If the target forks, `set follow-fork-mode child` follows the child.
+
+## Watchpoints, and what they cost
+
+`watch` on a memory location is the direct way to answer "who writes this",
+and it is the technique most often deployed without reading the limits:
+
+- Hardware slots are few — four on x86, two on ARM64. Beyond that the
+  debugger falls back to something slower, or refuses.
+- Granularity is the access width, so a watchpoint on a 4-byte address fires
+  on any access touching those bytes. To catch one byte, watch the word and
+  read the record.
+- Every thread can trigger it. Record the tid on every hit, because a
+  write attributed to the thread you happen to be attached to is often wrong.
+- A watchpoint on unmapped memory is invalid, and `awatch` fires far more
+  often than `watch` on anything hot.
+
+Turn on the record before you attach:
+
+```gdb
+set record full insn-number address
+(gdb) record full
+```
+
+Then dump it afterwards rather than stepping, which is the difference between
+an answer and an afternoon. `memory-runtime.md` covers what to do with the
+resulting events, and `stack-groups.py` groups the backtraces.

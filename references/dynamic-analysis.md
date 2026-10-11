@@ -35,6 +35,12 @@ cat /proc/sys/kernel/yama/ptrace_scope   # 0 permissive, 1 restricted, 3 none
 State the precondition in your notes when it fails. "Could not trace because
 ptrace_scope is 3" is a useful finding; silently switching tactics is not.
 
+The cheapest observations are also the ones most often skipped, and several
+of them need no debugger at all: `/proc/<pid>/maps` and `/proc/<pid>/smaps`
+give regions, permissions, modules and load bias from a file read. Starting
+there costs nothing and decides what is worth instrumenting. See
+`memory-runtime.md`.
+
 ## Techniques by availability
 
 ### Debugger (gdb / lldb)

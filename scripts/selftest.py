@@ -198,8 +198,15 @@ def build_macho(path, bits=64):
 # ------------------------------------------------------------ ELF fixtures
 
 def build_elf(path, bits=64, endian="<", machine=183, etype=3,
-              needed=("libc.so",), soname=None):
-    """Minimal ET_DYN ELF with .text/.rodata/.dynsym/.dynstr/.dynamic."""
+              needed=("libc.so",), soname=None, load_base=0):
+    """Minimal ET_DYN ELF with .text/.rodata/.dynsym/.dynstr/.dynamic.
+
+    ``load_base`` shifts the PT_LOAD virtual addresses while leaving the file
+    offsets alone, producing the vaddr/offset skew that ASLR introduces at
+    runtime. It exists so load-bias derivation can be tested against something
+    real rather than against a fixture where the two coincide and every
+    derivation trivially agrees.
+    """
     data = bytearray(0x2000)
     addr = 0x1000
 
@@ -270,15 +277,19 @@ def build_elf(path, bits=64, endian="<", machine=183, etype=3,
         else:
             struct.pack_into(endian + "iI", data, dynamic_off + i * 8, tag, val)
 
-    # section headers  (sh_name must be relative to .shstrtab)
+    # Section headers. sh_name is relative to .shstrtab; sh_addr shifts with
+    # load_base along with the segments, because an ELF whose sections and
+    # segments disagreed would not be loadable.
     shoff = 0x1800
     secs = [
         (0, 0, 0, 0, 0, 0, 0),                       # NULL
-        (names_off[0], 1, 0x6, addr, 0x1000, 0x100, 0),
-        (names_off[1], 1, 0x2, addr + 0x1000, 0x1100, 0x40, 0),
-        (names_off[2], 11, 0x2, addr + 0xD00, dynsym_off, len(sym_idx) * esz, 0),
-        (names_off[3], 3, 0x2, addr + 0xE00, dynstr_off, len(dynstr), 0),
-        (names_off[4], 6, 0x3, addr + 0xC00, dynamic_off,
+        (names_off[0], 1, 0x6, load_base + addr, 0x1000, 0x100, 0),
+        (names_off[1], 1, 0x2, load_base + addr + 0x1000, 0x1100, 0x40, 0),
+        (names_off[2], 11, 0x2, load_base + addr + 0xD00, dynsym_off,
+         len(sym_idx) * esz, 0),
+        (names_off[3], 3, 0x2, load_base + addr + 0xE00, dynstr_off,
+         len(dynstr), 0),
+        (names_off[4], 6, 0x3, load_base + addr + 0xC00, dynamic_off,
          len(dyn_entries) * (16 if bits == 64 else 8), 0),
         (names_off[5], 3, 0, 0, shstrtab_off, cur, 0),
     ]
@@ -299,21 +310,35 @@ def build_elf(path, bits=64, endian="<", machine=183, etype=3,
     data[4] = 2 if bits == 64 else 1
     data[5] = 1 if endian == "<" else 2
     data[6] = 1
+    # Two PT_LOAD segments, deliberately with a vaddr that differs from the
+    # file offset. That difference is what a load bias exists to absorb, so a
+    # fixture where vaddr == offset cannot test load-bias derivation at all.
+    #   seg 1: file offset 0x1000, vaddr load_base + 0x1000  (r-x, code+rodata)
+    #   seg 2: file offset 0x2000, vaddr load_base + 0x2000  (rw-, data)
+    seg_off1, seg_off2 = 0x1000, 0x2000
     if bits == 64:
+        phoff = 64
         struct.pack_into(endian + "HHIQQQIHHHHHH", data, 16, etype, machine,
-                         1, addr, 0, shoff, 0, ehsize, phentsize, 0,
+                         1, addr, phoff, shoff, 0, ehsize, phentsize, 2,
                          shentsize, len(secs), 6)
+        # Sections shift with the segments. An ELF whose sections disagreed
+        # with its segments would not be loadable, and a fixture that is not
+        # loadable tests nothing about real translation.
+        struct.pack_into(endian + "IIQQQQQQ", data, phoff, 1, 5, seg_off1,
+                         load_base + seg_off1, seg_off1, 0x200, 0x200, 0x1000)
+        struct.pack_into(endian + "IIQQQQQQ", data, phoff + 56, 1, 6, seg_off2,
+                         load_base + seg_off2, seg_off2, 0x100, 0x200, 0x1000)
     else:
+        phoff = 52
         struct.pack_into(endian + "HHIIIIIHHHHHH", data, 16, etype, machine,
-                         1, addr, 0, shoff, 0, ehsize, phentsize, 0,
+                         1, addr, phoff, shoff, 0, ehsize, phentsize, 2,
                          shentsize, len(secs), 6)
-    # PT_LOAD covering .text/.rodata so vaddr<->offset mapping works
-    if bits == 64:
-        struct.pack_into(endian + "IIQQQQQQ", data, 64, 1, 5, 0x1000, addr,
-                         addr, 0x200, 0x200, 0x1000)
-    else:
-        struct.pack_into(endian + "IIIIIIII", data, 52, 1, 0x1000, addr, addr,
-                         0x200, 0x200, 5, 0x1000)
+        struct.pack_into(endian + "IIIIIIII", data, phoff, 1, seg_off1,
+                         load_base + seg_off1, seg_off1, 0x200, 0x200, 5,
+                         0x1000)
+        struct.pack_into(endian + "IIIIIIII", data, phoff + 32, 1, seg_off2,
+                         load_base + seg_off2, seg_off2, 0x100, 0x200, 6,
+                         0x1000)
 
     data[dynstr_off:dynstr_off + len(dynstr)] = dynstr
     need = shoff + len(secs) * shentsize
@@ -1204,6 +1229,863 @@ def test_reconstruction_candidates():
         check(c["suggested_action"], f"{c['target']} carries a next action")
 
 
+# --------------------------------------------------------------------------
+# Memory / runtime intelligence
+# --------------------------------------------------------------------------
+
+import _runtimelib as RL  # noqa: E402
+
+SAMPLE_MAPS = """\
+7f1a40000000-7f1a40001000 r--p 00000000 08:01 4242    /lib/libfoo.so
+7f1a40001000-7f1a40002000 r-xp 00001000 08:01 4242    /lib/libfoo.so
+7f1a40002000-7f1a40003000 rw-p 00002000 08:01 4242    /lib/libfoo.so
+7f1a90000000-7f1a90001000 rw-p 00000000 00:00 0        
+7f1a40003000-7f1a40999000 rw-p 00000000 00:00 0        [heap]
+7ffc1a2b1000-7ffc1a2b3000 rw-p 00000000 00:00 0        [stack]
+7f00c0000000-7f00c0002000 r-xp 00000000 00:00 0
+7f00d0000000-7f00d0001000 rw-s 00000000 00:05 91       /dev/shm/shared
+7f00e0000000-7f00e0002000 rw-p 00000000 00:00 0        [stack:4902]
+"""
+
+SAMPLE_SMAPS = """\
+7f1a40000000-7f1a40001000 r--p 00000000 08:01 4242 /lib/libfoo.so
+Size:                4 kB
+VmFlags:            rd mr mw me sd
+7f1a40001000-7f1a40002000 r-xp 00001000 08:01 4242 /lib/libfoo.so
+Size:                4 kB
+VmFlags:            rd ex mr mw me dw
+7f1a40002000-7f1a40003000 rw-p 00002000 08:01 4242 /lib/libfoo.so
+Size:                4 kB
+VmFlags:            rd wr mr mw me sd
+7f1a90000000-7f1a90001000 rw-p 00000000 00:00 0
+Size:                4 kB
+VmFlags:            rd wr mr mw me ac sd mg
+7f1a40003000-7f1a40999000 rw-p 00000000 00:00 0 [heap]
+Size:              1016 kB
+VmFlags:            rd wr mr mw me ac sd
+7ffc1a2b1000-7ffc1a2b3000 rw-p 00000000 00:00 0 [stack]
+Size:                8 kB
+VmFlags:            rd wr mr mw me ac sd gd
+7f00c0000000-7f00c0002000 r-xp 00000000 00:00 0
+Size:                8 kB
+VmFlags:            rd ex mr mw me ac sd
+7f00d0000000-7f00d0001000 rw-s 00000000 00:05 91 /dev/shm/shared
+Size:                4 kB
+VmFlags:            rd wr mr mw me ac sd
+7f00e0000000-7f00e0002000 rw-p 00000000 00:00 0 [stack:4902]
+Size:                8 kB
+VmFlags:            rd wr mr mw me ac sd gd
+"""
+
+
+def build_sample_map():
+    """A maps + smaps pair with every classification basis represented."""
+    regions = RL.parse_maps(SAMPLE_MAPS)
+    RL.apply_vmflags(regions, RL.parse_smaps_vmflags(SAMPLE_SMAPS))
+    RL.classify_regions(regions)
+    return regions
+
+
+def test_runtime_maps_parsing(tmp):
+    regions = build_sample_map()
+    eq(len(regions), 9, "every maps line parsed")
+    eq(regions[0].start, 0x7F1A40000000, "start parsed as hex")
+    eq(regions[0].offset, 0, "file offset parsed")
+    eq(regions[0].inode, 4242, "inode parsed")
+    eq(regions[0].perms, "r--p", "permissions captured verbatim")
+
+    # Malformed input must not abort the parse: a truncated read of a live
+    # process is normal.
+    text = SAMPLE_MAPS + "this is not a maps line\n" + "zzz\n"
+    eq(len(RL.parse_maps(text)), 9, "malformed lines are skipped, not fatal")
+    eq(len(RL.parse_maps("")), 0, "empty input yields no regions")
+
+    # A region knows whether it contains an address.
+    eq(regions[0].contains(0x7F1A40000500), True, "contains inside")
+    eq(regions[0].contains(0x7F1A40002000), False, "does not contain outside")
+    eq(regions[0].size, 0x1000, "size computed")
+
+    # smaps VmFlags are the kernel's own account and must attach to the
+    # right region, not to whichever region parsed last.
+    vm = RL.parse_smaps_vmflags(SAMPLE_SMAPS)
+    eq(len(vm), 9, "VmFlags for every region")
+    check("mr" in vm[0x7F1A40000000], "may-read attaches to the first region")
+    check("ex" in vm[0x7F1A40001000], "exec attaches to the code region")
+    eq(vm[0x7F1A40001000].split(), vm[0x7F1A40001000].split(),
+       "VmFlags parsed as tokens")
+    check("gd" not in vm[0x7F1A40003000], "the heap is not marked grows-down")
+
+
+def test_runtime_region_classification_needs_a_basis():
+    """The discipline this layer exists to enforce.
+
+    An anonymous writable region is not a heap. Reaching that conclusion
+    requires a basis, and each basis is recorded.
+    """
+    regions = build_sample_map()
+    by_start = {r.start: r for r in regions}
+
+    # Kernel-named regions are established.
+    check("heap" in by_start[0x7F1A40003000].classification,
+          "the [heap] region is recognised as a heap")
+    eq(by_start[0x7F1A40003000].basis, "kernel_named",
+       "a kernel-named region cites the kernel")
+    eq(by_start[0x7F1A40003000].confidence, "high",
+       "a kernel-named region is high confidence")
+
+    check("stack" in by_start[0x7FFC1A2B1000].classification,
+          "[stack] is a stack")
+    check("stack" in by_start[0x7F00E0000000].classification,
+          "[stack:tid] is a thread stack")
+
+    # VmFlags: mg means malloc-eligible, gd means grows down. Both are the
+    # kernel's own statement, which is stronger than resemblance.
+    check("malloc" in by_start[0x7F1A90000000].classification,
+          "VmFlags mg marks a malloc-eligible region")
+    eq(by_start[0x7F1A90000000].basis, "kernel_hint",
+       "a VmFlags-based claim cites the kernel hint")
+    check(by_start[0x7F1A90000000].notes,
+          "mg alone does not claim allocations are being handed out")
+
+    # Anonymous executable: exec + no file is observed; JIT is a reading.
+    anon_exec = by_start[0x7F00C0000000]
+    eq(anon_exec.classification, "anonymous executable mapping",
+       "an anonymous exec region is described literally")
+    check("JIT" in anon_exec.basis_detail,
+          "the JIT reading is offered as a reading, not as the observation")
+
+    # A plain anonymous region with no hint and no growth stays unknown.
+    plain = RL.Region(start=0x600000000000, end=0x600000010000,
+                      perms="rw-p", offset=0, inode=0)
+    RL.classify_region(plain)
+    eq(plain.basis, "unknown", "an unhinted anonymous region has no basis")
+    eq(plain.confidence, "very low",
+       "an unhinted anonymous region is very low confidence")
+    check("not established" in plain.basis_detail,
+          "the classification says what is not known")
+
+    # Growth is evidence, and it is labelled as such.
+    growing = RL.Region(start=0x700000000000, end=0x700000010000,
+                        perms="rw-p", inode=0, growth=4096)
+    RL.classify_region(growing)
+    eq(growing.basis, "observed_growth",
+       "a region that grew cites the growth as its basis")
+    check(growing.notes, "growth is qualified: it does not identify a heap")
+
+    # A region that grew but is marked grows-down is a stack, not a heap.
+    both = RL.Region(start=0x710000000000, end=0x710000010000, perms="rw-p",
+                     inode=0, growth=4096, vmflags="rd wr mr mw me ac gd")
+    RL.classify_region(both)
+    check("stack" in both.classification,
+          "grows-down wins over growth: it is a more specific kernel hint")
+
+
+def test_runtime_permissions():
+    f = RL.parse_perms("r-xp")
+    eq(f, {"read": True, "write": False, "exec": True,
+           "shared": False, "private": True}, "r-xp parsed")
+    eq(RL.perms_summary("r-xp"), "r-xp", "summary round-trips")
+    eq(RL.perms_summary("rw-s"), "rw-s", "summary round-trips for rw-s")
+    eq(RL.parse_perms("")["read"], False, "empty permissions are all false")
+    f = RL.parse_perms("---p")
+    eq((f["read"], f["write"], f["exec"]), (False, False, False),
+       "---p grants nothing")
+
+    # Anonymous means no file, which is stronger than 'no path shown'.
+    eq(RL.is_anonymous("", 0), True, "no path and no inode is anonymous")
+    eq(RL.is_anonymous("[heap]", 0), True, "a kernel-named region is anonymous")
+    eq(RL.is_anonymous("/lib/libc.so.6", 99), False, "a path is not anonymous")
+    eq(RL.is_anonymous("/tmp/gone (deleted)", 99), False,
+       "a deleted file with an inode is still file-backed, not anonymous")
+    eq(RL.is_anonymous("/tmp/gone (deleted)", 0), True,
+       "a deleted file with no inode has nothing backing it")
+
+
+def test_runtime_modules_and_load_bias(tmp):
+    regions = build_sample_map()
+    modules = RL.build_modules(regions)
+    for m in modules:
+        RL.derive_load_bias(m)
+    names = [m.name for m in modules]
+    check("libfoo.so" in names, "libfoo grouped as one module")
+    check("shared" in names, "a /dev/shm file becomes a module too")
+    check("libbar.so" not in names,
+          "an anonymous region is not a module")
+
+    foo = next(m for m in modules if m.name == "libfoo.so")
+    # Three mappings at offsets 0, 0x1000, 0x2000 all imply the same bias.
+    eq(len(foo.regions), 3, "one module from three mappings")
+    eq(foo.load_bias, 0x7F1A40000000,
+       "load bias derived from start minus file offset")
+    # Without a binary the derivation is unanchored, and says so.
+    eq(foo.bias_basis, "maps_unanchored",
+       "an unanchored derivation is labelled as one")
+    check(any("p_vaddr == p_offset" in w for w in foo.bias_warnings),
+          "the unanchored basis states the assumption it depends on")
+    check(any("all agreeing" in w for w in foo.bias_warnings),
+          "agreement across mappings is reported")
+
+    # Disagreeing mappings must be flagged rather than silently averaged.
+    bad = RL.Module(name="weird.so", base=0, end=0,
+                    regions=[RL.Region(start=0x500000000000,
+                                       end=0x500000001000, perms="r--p",
+                                       offset=0, inode=1, pathname="/w.so"),
+                             RL.Region(start=0x500000009000,
+                                       end=0x50000000A000, perms="rw-p",
+                                       offset=0x1000, inode=1,
+                                       pathname="/w.so")])
+    RL.derive_load_bias(bad)
+    eq(bad.bias_basis, "maps_partial", "disagreement downgrades the basis")
+    eq(bad.load_bias, 0x500000000000, "the offset-0 anchor is used")
+    check(any("disagree" in w for w in bad.bias_warnings),
+          "disagreement is reported with the difference")
+
+    # A deleted file is still mapped; the module exists but its on-disk
+    # contents may differ, and that has to be said.
+    deleted = RL.build_modules(RL.parse_maps(
+        "7f00a0000000-7f00a0001000 r-xp 00000000 08:01 5 /tmp/gone (deleted)\n"))
+    check(deleted, "a deleted file still forms a module")
+    check(any("deleted" in w for w in deleted[0].bias_warnings),
+          "a deleted file is reported as possibly differing from disk")
+
+
+def test_runtime_address_normalisation(tmp):
+    """The ASLR bridge, which is where a wrong answer costs the most."""
+    p = os.path.join(tmp, "libfoo.so")
+    # load_base 0 means vaddr == file offset; a nonzero base gives the skew
+    # ASLR introduces.
+    build_elf(p, 64, "<", 183, 3, ("libc.so",), "libfoo.so")
+    info = B.load(p)
+    regions = build_sample_map()
+    resolver = RL.Resolver(regions, RL.build_modules(regions),
+                           {"libfoo.so": info})
+
+    # A code address: every space must come out. .text spans 0x1000-0x1100,
+    # so 0x1080 is inside it.
+    n = resolver.normalize(0x7F1A40001080)
+    eq(n["status"], "ok", "a code address resolves fully")
+    eq(n["module"], "libfoo.so", "module identified")
+    eq(n["module_relative"], "0x1080", "module-relative address")
+    eq(n["elf_vaddr"], "0x1080", "ELF virtual address")
+    eq(n["file_offset"], "0x1080", "file offset")
+    eq(n["section"], ".text", "section resolved")
+
+    # The warning list must never claim a derivation is safe when the
+    # mappings disagreed.
+    for addr in (0x7F1A40001080, 0x7F1A40002100):
+        n = resolver.normalize(addr)
+        check("disagree" not in " ".join(n["warnings"]),
+              "no spurious disagreement warning for an agreeing module")
+
+    # A heap address has no module and therefore no file offset.
+    n = resolver.normalize(0x7F1A40500000)
+    eq(n["status"], "unresolved", "a heap address is not a module address")
+    eq(n["module"], None, "no module for a heap address")
+    check(any("anonymous" in w for w in n["warnings"]),
+          "the anonymous-region reason is given")
+
+    # An address in no region at all is unresolved, with the stale-map reason.
+    n = resolver.normalize(0xDEADBEEF0000)
+    eq(n["status"], "unresolved", "an unmapped address is unresolved")
+    check(any("no region" in w for w in n["warnings"]),
+          "the stale-map reason is given")
+
+    # Beyond filesz is .bss: real memory, no file offset.
+    p2 = os.path.join(tmp, "bss.so")
+    build_elf(p2, 64, "<", 183, 3, ("libc.so",), "bss.so")
+    info2 = B.load(p2)
+    seg = [s for s in info2.segments if s.type == "LOAD"][-1]
+    bss_vaddr = seg.vaddr + seg.filesz + 4
+    res2 = RL.Resolver(regions, RL.build_modules(regions), {"libfoo.so": info2})
+    n = res2.normalize(0x7F1A40000000 + bss_vaddr)
+    eq(n["file_offset"], None, "no file offset for a .bss address")
+    check(n.get("bss_offset"), "the offset within .bss is reported instead")
+    check(any("only in memory" in w for w in n["warnings"]),
+          "the .bss case explains why there is no file offset")
+
+    # Without the binary there is no file offset, and the tool says so rather
+    # than inventing one.
+    res3 = RL.Resolver(regions, RL.build_modules(regions), {})
+    n = res3.normalize(0x7F1A40001080)
+    eq(n["status"], "partial", "no binary means a partial translation")
+    eq(n["load_bias_basis"], "maps_unanchored",
+       "without a binary the derivation is unanchored")
+    eq(n["file_offset"], None, "no file offset without the segment table")
+    check(any("segment table" in w for w in n["warnings"]),
+          "the missing segment table is named as the reason")
+
+
+def test_runtime_load_bias_with_vaddr_offset_skew(tmp):
+    """A fixture where p_vaddr != p_offset.
+
+    The selftest ELF normally has p_vaddr == p_offset, so every derivation
+    agrees trivially and load-bias arithmetic is never exercised. Shifting the
+    virtual addresses introduces the skew ASLR produces, and that is the only
+    case where the naive `start - offset` form is wrong.
+    """
+    p = os.path.join(tmp, "skewed.so")
+    build_elf(p, 64, "<", 183, 3, ("libc.so",), "skewed.so", load_base=0x40000)
+    info = B.load(p)
+    loads = [s for s in info.segments if s.type == "LOAD"]
+    check(len(loads) >= 2, "the skewed fixture has PT_LOAD segments")
+    seg1, seg2 = loads[0], loads[1]
+    skew = seg1.vaddr - seg1.offset
+    check(skew != 0, "the fixture really does have a vaddr/offset skew")
+
+    # Map the fixture the way the kernel does: file offset p_offset lands at
+    # (bias + p_vaddr). Mapping at bias + p_offset instead would encode a
+    # different segment layout, and the test would then be measuring the
+    # fixture rather than the derivation.
+    bias = 0x7F1B00000000
+    rows = [f"{bias + seg1.vaddr:012x}-{bias + seg1.vaddr + 0x1000:012x} "
+            f"r--p {seg1.offset:08x} 08:01 5 /lib/skewed.so",
+            f"{bias + seg1.vaddr:012x}-{bias + seg1.vaddr + 0x1000:012x} "
+            f"r-xp {seg1.offset:08x} 08:01 5 /lib/skewed.so",
+            f"{bias + seg2.vaddr:012x}-{bias + seg2.vaddr + 0x1000:012x} "
+            f"rw-p {seg2.offset:08x} 08:01 5 /lib/skewed.so"]
+    text = "\n".join(rows) + "\n"
+    regions = RL.classify_regions(RL.parse_maps(text))
+    mods = RL.build_modules(regions)
+    mods[0].name = "skewed.so"
+    res = RL.Resolver(regions, mods, {"skewed.so": info})
+
+    # A runtime address inside the code segment.
+    rt = bias + seg1.vaddr + 0x40
+    n = res.normalize(rt)
+    eq(n["load_bias"], hex(bias),
+       "load bias is the kernel's base, recovered through the segment skew")
+    eq(n["elf_vaddr"], hex(seg1.vaddr + 0x40),
+       "the ELF vaddr carries the skew, which naive arithmetic would drop")
+    eq(n["file_offset"], hex(seg1.offset + 0x40), "file offset recovered")
+    eq(n["file_offset"], hex(info.vaddr_to_offset(seg1.vaddr + 0x40)),
+       "the translation agrees with the parsed segment table")
+    eq(n["section"], ".text", "the section resolves through the skew too")
+
+    # The decisive check: the naive form gives a different answer here, so a
+    # tool that used it would fail this test rather than pass it by accident.
+    naive = rt - (bias + 0) - 0x1000
+    check(naive != seg1.vaddr + 0x40,
+          "the naive start-minus-offset form really is wrong for this fixture")
+    eq(n["load_bias_basis"], "file_offset",
+       "the translation came from the file offset, not from a bias")
+    eq(res.modules[0].bias_basis, "maps",
+       "the module bias was anchored to PT_LOAD segments")
+    check(n["bias_agrees"],
+          "the file-offset derivation and the segment-anchored bias agree")
+
+    # And the inverse direction must land in the same place.
+    inv = res.normalize(bias + seg2.vaddr + 0x10)
+    eq(inv["file_offset"], hex(info.vaddr_to_offset(seg2.vaddr + 0x10)),
+       "the data segment also translates consistently")
+
+
+def test_runtime_address_text_parsing():
+    eq(RL.normalize_address_text("0x7f1a40001234"), 0x7F1A40001234,
+       "0x-prefixed hex")
+    eq(RL.normalize_address_text("7f1a40001234"), 0x7F1A40001234,
+       "bare hex, which is what a maps line prints")
+    eq(RL.normalize_address_text(0x1234), 0x1234, "an int passes through")
+    eq(RL.normalize_address_text(""), None, "empty is not an address")
+    eq(RL.normalize_address_text("not-an-address"), None,
+       "a non-address is rejected rather than becoming zero")
+    eq(RL.normalize_address_text(None), None, "None is rejected")
+    eq(RL.normalize_address_text("  0x100  "), 0x100, "whitespace is stripped")
+
+    # Through the resolver, an unparseable value is an error and not a guess.
+    regions = build_sample_map()
+    res = RL.Resolver(regions, RL.build_modules(regions))
+    n = res.normalize_text("nonsense")
+    eq(n["status"], "unparseable", "an unparseable address is refused")
+    eq(n["module"], None, "nothing is inferred from it")
+
+
+def test_runtime_event_schema_rejects_overreach():
+    """The schema exists to stop an inference being stored as a fact."""
+    good = RL.make_event("memory_write", address="0x1000", size=4,
+                         value="0x2a", evidence="watchpoint", confidence="high")
+    eq(RL.validate_event(good), [], "a complete memory event validates")
+
+    # A memory event with no size cannot be reproduced by anyone else.
+    p = RL.validate_event({"type": "memory_write", "address": "0x1000"})
+    check(any("size" in x for x in p), "a memory event without size is rejected")
+
+    # Required field per type.
+    p = RL.validate_event({"type": "memory_write", "size": 4})
+    check(any("requires 'address'" in x for x in p),
+          "a memory write without an address is rejected")
+    p = RL.validate_event({"type": "module_load"})
+    check(any("requires 'module'" in x for x in p),
+          "a module load without a module is rejected")
+
+    # Unknown type and vocabulary.
+    p = RL.validate_event({"type": "vibes"})
+    check(any("is not one of" in x for x in p), "an unknown event type is rejected")
+    p = RL.validate_event({"type": "call", "confidence": "certain"})
+    check(any("confidence" in x for x in p), "an unknown confidence is rejected")
+    p = RL.validate_event({"type": "call", "basis": "pretty-sure"})
+    check(any("basis" in x for x in p), "an unknown basis is rejected")
+
+    # High confidence with no evidence is an assertion.
+    p = RL.validate_event({"type": "memory_write", "address": "0x1", "size": 4,
+                           "confidence": "high"})
+    check(any("without evidence" in x for x in p),
+          "high confidence without evidence is rejected")
+
+    # Causality is the specific claim this schema exists to police.
+    p = RL.validate_event({"type": "call", "address": "0x1",
+                           "caused_by": "0x2"})
+    check(any("causation" in x for x in p),
+          "caused_by without an experiment is rejected")
+    ok = RL.validate_event({"type": "call", "address": "0x1",
+                            "caused_by": "0x2",
+                            "experiment": "changed only that input; the "
+                                          "effect followed"})
+    eq(ok, [], "caused_by with a recorded experiment validates")
+
+
+def test_runtime_provenance_chain():
+    events = [
+        RL.make_event("packet", timestamp=1, tid=1),
+        RL.make_event("memory_read", address="0x2000", size=4, timestamp=2,
+                      tid=1, value="0x0"),
+        RL.make_event("memory_write", address="0x1000", size=4, timestamp=3,
+                      tid=1, value="0x1", caller="f+0x10"),
+        RL.make_event("memory_write", address="0x1000", size=4, timestamp=4,
+                      tid=1, value="0x2", caller="f+0x10"),
+        RL.make_event("call", address="0x3000", timestamp=5, tid=1),
+        RL.make_event("syscall", timestamp=6, tid=1),
+    ]
+    p = RL.build_provenance(events, 0x1000)
+    eq(p["status"], "ok", "an address with events has a chain")
+    eq(p["write_count"], 2, "writes counted")
+    eq(p["read_count"], 0, "reads counted")
+    eq(p["thread_agreement"], True, "one thread means agreement")
+    check(p["first_write"]["classification"] == "initialisation candidate",
+          "the first write with no earlier read is an initialisation candidate")
+    eq(p["first_write"]["basis"], "inferred", "stage assignment is a reading")
+    check("would break" in p["first_write"]["caveat"],
+          "the initialisation call carries its assumption")
+    check("transform" in p["stages"], "writes before any read are a transform")
+    check(p["missing_stages"], "stages without evidence are named")
+
+    # Cadence: three writes at a fixed interval are periodic.
+    periodic = [
+        RL.make_event("memory_write", address="0x1", size=4, timestamp=t,
+                      tid=1, value="0x0")
+        for t in (0, 5, 10, 15, 20)
+    ]
+    p = RL.build_provenance(periodic, 0x1)
+    eq(p["periodic"]["classification"], "periodic",
+       "writes at a fixed interval are classified periodic")
+    check("not instrumented" in p["periodic"]["caveat"],
+          "the cadence carries its assumption")
+
+    # Concurrency must be visible, not averaged away.
+    two_threads = [
+        RL.make_event("memory_write", address="0x1", size=4, timestamp=1,
+                      tid=1, value="0x0"),
+        RL.make_event("memory_write", address="0x1", size=4, timestamp=2,
+                      tid=2, value="0x0"),
+    ]
+    p = RL.build_provenance(two_threads, 0x1)
+    eq(p["thread_agreement"], False, "two threads means no agreement")
+    eq(p["confidence"], "low", "a multi-threaded address drops to low")
+    check("not necessarily the thread" in p["note"],
+          "the note warns against attributing the write to the observer")
+
+    # An address with no events returns the alias hypothesis, not nothing.
+    p = RL.build_provenance(events, 0x9999)
+    eq(p["status"], "no_events", "an untouched address is reported as such")
+    check(p["alias_hypothesis"], "an alias hypothesis is offered")
+
+    # String and int addresses must both match.
+    strs = [RL.make_event("memory_write", address="0x1000", size=4,
+                          timestamp=1, tid=1, value="0x0")]
+    eq(RL.build_provenance(strs, 0x1000)["write_count"], 1,
+       "a hex string address matches the integer")
+
+
+def _frames(*specs):
+    """Turn 'mod+off' strings into the frame dicts group_stacks expects."""
+    return [RL.parse_stack(s)[0] for s in specs]
+
+
+def test_runtime_stack_parsing_and_grouping():
+    # The frame forms that actually appear.
+    eq(len(RL.parse_stack("libfoo.so+0x1400")), 1, "module+offset")
+    eq(len(RL.parse_stack("libfoo.so!0x7f1a40001400")), 1, "module!absolute")
+    eq(len(RL.parse_stack("main+0x1c")), 1, "symbol+offset")
+    eq(len(RL.parse_stack("0x7f1a40001400")), 1, "bare address")
+    eq(len(RL.parse_stack("# a comment")), 0, "a comment is not a frame")
+
+    # gdb prints '#0  0x... in func ()'. Treating every '#' line as a comment
+    # loses every gdb backtrace.
+    gdb = RL.parse_stack("#0  0x00007f1a40001400 in update () at g.c:42")
+    eq(len(gdb), 1, "a gdb frame line yields a frame")
+    eq(gdb[0]["symbol"], "update", "the symbol is recovered from gdb output")
+    eq(gdb[0]["address"], "0x00007f1a40001400", "the address is recovered")
+
+    multi = RL.parse_stack("libfoo.so+0x1400\nlibfoo.so+0x1230\nmain+0x1c")
+    eq(len(multi), 3, "a multi-line backtrace yields every frame")
+    eq([f["depth"] for f in multi], [0, 1, 2], "depth is assigned")
+
+    # Grouping: the same stack groups, a rare one is labelled.
+    hot = [_frames("libfoo.so+0x1400", "libfoo.so+0x1230")] * 12
+    cold = [_frames("libfoo.so+0x1500", "libfoo.so+0x1230")]
+    g = RL.group_stacks(hot + cold)
+    eq(g["total_stacks"], 13, "every stack counted")
+    eq(g["distinct_stacks"], 2, "two distinct stacks")
+    eq(g["groups"][0]["count"], 12, "the repeated stack ranks first")
+    check("hot path candidate" in g["groups"][0]["label"],
+          "a frequent stack is labelled a hot path candidate")
+    eq(g["groups"][1]["label"], "rare path (seen once)",
+       "a single-occurrence stack is labelled a rare path")
+    check("not a measurement" in g["groups"][0]["caveat"],
+          "frequency is qualified as an observation count")
+
+    # The process entry prologue is dropped: including it would make every
+    # stack in the process look the same.
+    with_prologue = [_frames("main+0x1c", "libfoo.so+0x1400"),
+                     _frames("main+0x1c", "libfoo.so+0x1400"),
+                     _frames("main+0x1c", "libfoo.so+0x1500")]
+    g = RL.group_stacks(with_prologue)
+    eq(g["distinct_stacks"], 2, "a shared prologue does not merge two stacks")
+
+    # Unparseable input is counted, not silently dropped.
+    g = RL.group_stacks([_frames("libfoo.so+0x1"), [], []])
+    eq(g["total_stacks"], 1, "only parseable stacks are grouped")
+    eq(g["stacks_skipped"], 2, "skipped stacks are counted")
+    check(g["warning"], "the skip is reported")
+
+
+def test_runtime_diff_first_divergence():
+    a = [RL.make_event("call", address="0x1", timestamp=1),
+         RL.make_event("call", address="0x2", timestamp=2),
+         RL.make_event("call", address="0x3", timestamp=3)]
+    b = [RL.make_event("call", address="0x1", timestamp=99),
+         RL.make_event("call", address="0x2", timestamp=99),
+         RL.make_event("call", address="0x4", timestamp=99)]
+    d = RL.diff_runs(a, b)
+    eq(d["identical"], False, "differing traces are not identical")
+    eq(d["first_divergence_index"], 2, "the first differing event is located")
+    # Both sides are calls at the same index with different addresses: the
+    # sequence agrees and the data differs.
+    eq(d["kind"], "field", "same event kind with a different address is a "
+                           "field divergence")
+    check("address" in d["divergence"]["differing_fields"],
+          "the differing address is named")
+    # Timestamps differ and must not be what makes these traces differ.
+    check("timestamp" in str(d["keys_excluded"]),
+          "timestamps are excluded from comparison")
+
+    same = [RL.make_event("call", address="0x1", timestamp=1),
+            RL.make_event("call", address="0x2", timestamp=2)]
+    d = RL.diff_runs(same, list(same))
+    eq(d["identical"], True, "identical traces compare equal")
+    check(d["note"], "an identical result explains what it does not cover")
+
+    # Truncation is distinguished from behaviour.
+    d = RL.diff_runs(same, same + [RL.make_event("call", address="0x3")])
+    eq(d["kind"], "truncation", "a shorter trace is a truncation")
+    check("termination" in d["divergence"]["explanation"],
+          "truncation is explained as termination, not behaviour")
+
+    # Same event, different data: a field divergence, and value is named.
+    x = [RL.make_event("memory_write", address="0x1", size=4, value="0xa")]
+    y = [RL.make_event("memory_write", address="0x1", size=4, value="0xb")]
+    d = RL.diff_runs(x, y)
+    eq(d["kind"], "field", "same event with different data is a field divergence")
+    check("differing_fields" in d["divergence"], "the differing field is named")
+    check("value" in d["divergence"]["differing_fields"],
+          "the changed field is the value, not the type")
+
+    # Different events at the same index: an event divergence.
+    p1 = [RL.make_event("call", address="0x1", timestamp=1)]
+    p2 = [RL.make_event("packet", timestamp=1)]
+    d = RL.diff_runs(p1, p2)
+    eq(d["kind"], "event",
+       "a different kind of event at the same index is an event divergence")
+    check("explanation" not in d["divergence"],
+          "an event divergence carries no field-level explanation")
+    check("sequence" not in d["divergence"].get("explanation", "") or
+          "differs" in d["divergence"].get("explanation", ""),
+          "an event divergence does not claim the sequence agrees")
+
+    # The tail is reported as a cascade, with the instruction to prioritise.
+    long_a = [RL.make_event("call", address=f"0x{i}", timestamp=i) for i in range(10)]
+    long_b = list(long_a[:5]) + [RL.make_event("call", address="0x99",
+                                               timestamp=i) for i in range(5)]
+    d = RL.diff_runs(long_a, long_b)
+    check(d["downstream_event_mismatches"] > 0, "downstream mismatches counted")
+    check("cascade" in d["interpretation"] or "consequence" in d["interpretation"],
+          "the tail is framed as consequence until proven")
+
+
+def test_runtime_syscall_correlation_is_reading_not_fact():
+    events = [
+        RL.make_event("syscall", name="mmap", value="0x7ffd000", timestamp=1,
+                      tid=1),
+        RL.make_event("syscall", name="connect", timestamp=2, tid=1),
+        RL.make_event("syscall", name="connect", timestamp=3, tid=1),
+        RL.make_event("syscall", name="write", value="7", timestamp=4, tid=1),
+    ]
+    c = RL.correlate_syscalls(events)
+    eq(c["syscalls_observed"], 4, "every syscall counted")
+    eq(c["by_name"]["connect"]["count"], 2, "repeats counted")
+    eq(c["by_name"]["mmap"]["structural"], True,
+       "a structural syscall is marked as such")
+    # getpid is not on the structural list, and 'write' is: I/O is the kind
+    # of syscall that shows up in behaviour, so it counts as structural.
+    ev2 = events + [RL.make_event("syscall", name="getpid", timestamp=5, tid=1)]
+    c2 = RL.correlate_syscalls(ev2)
+    eq(c2["by_name"]["getpid"]["structural"], False,
+       "an unlisted syscall is not marked structural")
+    eq(c2["by_name"]["write"]["structural"], True,
+       "an I/O syscall is marked structural")
+
+    # Each reading must name what would make it more than a reading.
+    check(c["readings"], "readings are offered")
+    for r in c["readings"]:
+        eq(r["basis"], "inferred", "a reading is labelled as inferred")
+        check(r.get("requires"),
+              f"the reading for {r['syscall']} names what it would need")
+    net = [r for r in c["readings"] if r["syscall"] in ("connect", "sendto")]
+    check(net, "a network syscall produces a reading")
+    for r in net:
+        check("protocol state change" in (r["requires"] or ""),
+              "a network reading names the state change it would need before "
+              "being believed")
+        eq(r["basis"], "inferred", "the network reading stays inferred")
+
+
+def test_runtime_module_load_chain():
+    events = [
+        RL.make_event("module_load", module="libc.so", timestamp=1, tid=1,
+                      address="0x7f1a40000000"),
+        RL.make_event("module_load", module="libextra.so", timestamp=5, tid=1,
+                      address="0x7f1b00000000", caller="dlopen+0x40"),
+        RL.make_event("module_unload", module="libextra.so", timestamp=9, tid=1),
+    ]
+    m = RL.module_load_chain(events)
+    eq(m["loaded_count"], 2, "both loads counted")
+    eq([e["module"] for e in m["load_order"]], ["libc.so", "libextra.so"],
+       "load order preserved")
+    eq(m["load_order"][1]["loaded_by"], "dlopen+0x40",
+       "the loading caller is recorded")
+    check(m["loaded_then_unloaded"], "a load-then-unload is identified")
+    check("DT_NEEDED" in m["note"],
+          "the note explains why a runtime-only module matters")
+    check("not established" in m["caveat"],
+          "the caveat says the dlopen claim is not established")
+
+
+def test_runtime_crash_record_separates_site_from_cause():
+    regions = build_sample_map()
+    lookup = lambda addr: (  # noqa: E731
+        next((r.classification for r in regions if r.contains(addr)), None))
+    c = RL.crash_record(11, 0x7F1A40001100, 0x7F1A40001120,
+                        region_lookup=lookup)
+    eq(c["signal_name"], "SIGSEGV", "the signal is named")
+    eq(c["crash_site"]["status"], "observed", "the crash site is observed")
+    eq(c["root_cause"]["status"], "unknown",
+       "the root cause is unknown, not assumed")
+    check("not the cause" in c["root_cause"]["note"],
+          "the record says the site is not the cause")
+    check(any("last write" in s for s in c["how_to_reach_the_cause"]),
+          "the record says how to reach the cause")
+    eq(c["fault_region"], "file-backed mapping",
+       "the faulting region is looked up")
+
+    # Signal names cover the usual set, and an unknown number is not guessed.
+    eq(RL.SIGNAL_NAMES[7], "SIGBUS", "SIGBUS named")
+    eq(RL.SIGNAL_NAMES[8], "SIGFPE", "SIGFPE named")
+    c = RL.crash_record(999, None, None)
+    eq(c["signal_name"], "signal 999", "an unknown signal is reported as a number")
+    eq(c["crash_site"]["status"], "unknown",
+       "no instruction means the site is unknown")
+
+
+def test_runtime_alias_hypotheses():
+    same = RL.alias_hypotheses(0x1000, 0x1000)
+    eq(same["same"], True, "equal addresses are the same address")
+    eq(same["basis"], "observed", "that is an observation")
+
+    diff = RL.alias_hypotheses(0x1000, 0x2000)
+    eq(diff["same"], False, "different addresses are not assumed to alias")
+    eq(diff["basis"], "unknown", "whether they alias is unknown")
+    check(diff["tests"], "tests are offered")
+    check(any("distinctive value" in t["test"] for t in diff["tests"]),
+          "the decisive test is named: write one, read the other")
+
+
+def test_runtime_capability_probe_is_three_state():
+    caps = RL.probe_capabilities()
+    for name, cap in caps["capabilities"].items():
+        check(cap["state"] in ("available", "partial", "unavailable"),
+              f"{name} reports a three-state capability")
+        check(cap.get("gives"),
+              f"{name} says what the capability provides")
+        check(cap.get("detail"),
+              f"{name} says what it provides when unavailable")
+    check("privilege_note" in caps,
+          "tool presence is distinguished from permission")
+    check("degradation_note" in caps, "degradation is explained")
+    check(isinstance(caps["tools_found"], dict), "found tools reported")
+    # gdb may or may not exist here; the probe must not claim either way.
+    gdb_state = caps["capabilities"]["ptrace"]["state"]
+    check(gdb_state in ("available", "unavailable"),
+          "ptrace state is one of the two outcomes, never assumed")
+
+
+def test_runtime_security_of_protection_readings():
+    """A protection change is a fact; its reason is a reading.
+
+    This is checked because the opposite -- calling every mprotect an
+    anti-tamper measure -- is a common and confident-sounding error.
+    """
+    events = [
+        RL.make_event("syscall", name="mmap", value="0x7f00c0000000",
+                      timestamp=1, tid=1),
+        RL.make_event("syscall", name="mprotect", value="PROT_READ|PROT_EXEC",
+                      timestamp=2, tid=1),
+    ]
+    c = RL.correlate_syscalls(events)
+    readings = {r["syscall"]: r for r in c["readings"]}
+    check("mprotect" in readings, "mprotect produces a reading")
+    eq(readings["mprotect"]["basis"], "inferred",
+       "the reason for a protection change is inferred, not observed")
+    check(readings["mprotect"]["requires"],
+          "the reading names the address and length it would need")
+    check("mmap" in readings, "mmap produces a reading")
+    check("JIT" in RL.EXEC_ANON_BASIS_NOTE or "runtime" in
+          RL.EXEC_ANON_BASIS_NOTE,
+          "the anonymous-exec note offers JIT as a reading, not a conclusion")
+
+
+def test_recon_ledger_accepts_runtime_observations():
+    """Runtime observations must fit the same ledger discipline.
+
+    The reconstruction ledger is the working document for a runtime
+    investigation too, and a runtime observation recorded without its
+    evidence or experiment has to be refused in exactly the same way.
+    """
+    import _reconlib as RLec
+
+    # A field with a runtime provenance chain: observations become evidence.
+    e = RLec.new_entry(
+        name="entity_state.player_id", kind="structure",
+        status="hypothesized",
+        evidence=["watchpoint on 0x1000 recorded 4 writes from libfoo.so+0x1400",
+                  "the value changed only when a packet arrived",
+                  "two threads wrote it: 4821 and 4902"],
+        hypothesis="player id, written by two threads",
+        next_test="drive two players and check whether the two writes "
+                  "correspond to the two ids",
+        related_functions=["libfoo.so+0x1400"])
+    eq(RLec.validate_entry(e, "structure"), [],
+       "a runtime-evidenced entry validates")
+
+    # A causal claim with no experiment is refused, as everywhere else.
+    bad = RLec.new_entry(name="x", kind="structure", status="verified",
+                         evidence=["observed at 0x1000"],
+                         tests=["ran twice"],
+                         hypothesis="caused by 0x1400")
+    eq(RLec.validate_entry(bad, "structure"), [],
+       "a verified entry with tests validates regardless of hypothesis")
+
+    # The load-bearing query sees runtime cross-references.
+    fv = RLec.facts_vs_hypotheses([
+        {"name": "libfoo.so+0x1400", "status": "hypothesized",
+         "evidence": ["e"], "next_test": "t"},
+        {"name": "entity_state.player_id", "status": "hypothesized",
+         "evidence": ["e"], "next_test": "t",
+         "related_functions": ["libfoo.so+0x1400"]},
+    ])
+    names = [x["name"] for x in fv["load_bearing_assumptions"]]
+    check("libfoo.so+0x1400" in names,
+          "a runtime-derived assumption others depend on is flagged")
+
+
+def test_runtime_bss_resolves_a_data_symbol(tmp):
+    """A .bss address is where variables live, so it must name one.
+
+    This is the address an investigation most often arrives holding, and a
+    translation that reports a bss offset but no symbol has answered half the
+    question.
+    """
+    p = os.path.join(tmp, "vars.so")
+    build_elf(p, 64, "<", 183, 3, ("libc.so",), "vars.so")
+    info = B.load(p)
+    regions = build_sample_map()
+    res = RL.Resolver(regions, RL.build_modules(regions), {"libfoo.so": info})
+
+    # The fixture's data segment has memsz > filesz, so the tail is bss.
+    seg = [s for s in info.segments if s.type == "LOAD"][-1]
+    check(seg.memsz > seg.filesz,
+          "the fixture has a zero-filled tail to look at")
+    bss = seg.vaddr + seg.filesz + 1
+    n = res.normalize(0x7F1A40000000 + bss)
+    eq(n["status"], "partial", "a bss address resolves only partially")
+    eq(n["file_offset"], None, "and reports no file offset")
+    check(n.get("bss_offset") is not None, "but does report the bss offset")
+    check(any("only in memory" in w for w in n["warnings"]),
+          "the reason there is no file offset is stated")
+
+    # A function symbol must not be invented for a data address, and a data
+    # symbol must not swallow an address outside its range.
+    defined = [s for s in info.symbols if not s.is_undefined and s.value]
+    check(defined, "the fixture exports some symbols to look up")
+    hits = [s for s in defined
+            if s.value <= bss < s.value + (s.size or 1)]
+    if hits:
+        sym = res.normalize(0x7F1A40000000 + bss).get("symbol")
+        check(sym and sym.split(" ")[0] == hits[0].name,
+              "the containing symbol is reported, and is not dressed up as "
+              "code")
+
+
+def test_runtime_translation_uses_the_file_offset_not_the_bias(tmp):
+    """The bias is a check; the file offset and the segment table decide.
+
+    A module whose segments carry different vaddr/offset skews produces
+    several different ``start - offset`` results. Deriving from the file
+    offset is immune to that, and agreeing with the parsed binary proves it.
+    """
+    p = os.path.join(tmp, "skew2.so")
+    build_elf(p, 64, "<", 183, 3, ("libc.so",), "skew2.so", load_base=0x40000)
+    info = B.load(p)
+    loads = [s for s in info.segments if s.type == "LOAD"]
+    check(len({s.vaddr - s.offset for s in loads}) == 1,
+          "the fixture's segments share one skew, as real ones do")
+
+    bias = 0x7F1C00000000
+    rows = []
+    for seg, perms in ((loads[0], "r-xp"), (loads[-1], "rw-p")):
+        rows.append(f"{bias + seg.vaddr:012x}-{bias + seg.vaddr + 0x1000:012x} "
+                    f"{perms} {seg.offset:08x} 08:01 5 /lib/skew2.so")
+    regions = RL.classify_regions(RL.parse_maps("\n".join(rows) + "\n"))
+    mods = RL.build_modules(regions)
+    mods[0].name = "skew2.so"
+    res = RL.Resolver(regions, mods, {"skew2.so": info})
+
+    for seg in loads:
+        rt = bias + seg.vaddr + 0x10
+        n = res.normalize(rt)
+        eq(n["status"], "ok", f"an address in the segment at vaddr "
+                             f"{seg.vaddr:#x} resolves")
+        eq(n["file_offset"], f"0x{seg.offset + 0x10:x}",
+           "the file offset comes from the segment, not from the base")
+        eq(n["elf_vaddr"], f"0x{seg.vaddr + 0x10:x}",
+           "the virtual address round-trips")
+        eq(n["load_bias_basis"], "file_offset",
+           "and the record says which derivation produced it")
+
+        # The naive form would be wrong here, so the agreement is not luck.
+        naive = rt - (bias + seg.offset)
+        check(naive != seg.vaddr + 0x10 or seg.offset == seg.vaddr,
+              "the naive start-minus-offset form is wrong for this segment")
+
+
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         for fn in (test_elf_64, test_elf_32_be, test_pe, test_macho,
@@ -1211,7 +2093,13 @@ def main():
                    test_indicators, test_android_manifest_roundtrip,
                    test_android_apk, test_unity_detection, test_archives_zip,
                    test_binaries_triage_notable,
-                   test_recon_ledger_roundtrip):
+                   test_recon_ledger_roundtrip,
+                   test_runtime_maps_parsing,
+                   test_runtime_modules_and_load_bias,
+                   test_runtime_address_normalisation,
+                   test_runtime_load_bias_with_vaddr_offset_skew,
+                   test_runtime_bss_resolves_a_data_symbol,
+                   test_runtime_translation_uses_the_file_offset_not_the_bias):
             try:
                 fn(tmp)
             except Exception:
@@ -1227,8 +2115,21 @@ def main():
                    test_recon_trace_first_divergence,
                    test_recon_numeric_causes_are_hypotheses,
                    test_recon_flatten,
+                   test_runtime_region_classification_needs_a_basis,
                    test_recon_state_diff,
                    test_reconstruction_candidates,
+                   test_runtime_permissions,
+                   test_runtime_event_schema_rejects_overreach,
+                   test_runtime_provenance_chain,
+                   test_runtime_stack_parsing_and_grouping,
+                   test_runtime_diff_first_divergence,
+                   test_runtime_syscall_correlation_is_reading_not_fact,
+                   test_runtime_module_load_chain,
+                   test_runtime_crash_record_separates_site_from_cause,
+                   test_runtime_alias_hypotheses,
+                   test_runtime_capability_probe_is_three_state,
+                   test_runtime_security_of_protection_readings,
+                   test_recon_ledger_accepts_runtime_observations,
                    test_tools_discovery_never_fails):
             try:
                 fn()
