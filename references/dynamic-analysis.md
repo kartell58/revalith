@@ -97,6 +97,14 @@ permission is still required and it does not give control flow.
 `qemu-user` runs foreign-architecture binaries on the host; full-system
 emulation handles whole systems. Useful when the target architecture is not
 native. Slower than native execution, and some syscalls behave differently.
+`emulation.md` covers choosing a level, building an instruction-level harness,
+and — the part that matters most — what an emulated result does not prove.
+
+### Obstruction
+
+Packing, control-flow flattening, encrypted strings and anti-disassembly
+change which of the above work. `obfuscation.md` covers recognising each one
+and what evidence distinguishes a guess from a finding.
 
 ## Making the experiment capable of refutation
 

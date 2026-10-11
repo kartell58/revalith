@@ -96,7 +96,9 @@ Adaptive, not a checklist. Moving backwards is expected, not a failure.
 12. **Reconstruct arguments and returns** — conservative naming.
 13. **Infer structures** — offsets, not invented field names.
 14. **Compare versions** — when another build exists.
-15. **Dynamic analysis** — when static analysis stops being decisive.
+15. **Dynamic analysis** — when static analysis stops being decisive. Under
+    emulation when the target cannot run here; see `references/emulation.md`.
+    For a raw firmware image, start at `references/firmware.md`.
 16. **Map memory and runtime** — regions, modules, threads, addresses. When
     the question is about what actually happens. `references/memory-runtime.md`.
 17. **Hook and trace** — observe real arguments, returns and memory writes.
@@ -196,6 +198,9 @@ with the measurements and the synthetic parts marked separately.
 | A protocol on the wire | capture bytes first | `references/protocols.md` |
 | Software you intend to rebuild | `universal-dump.py` | `reconstruction_candidates`, then `references/reconstruction.md` |
 | A running process, and a question about it | `memory-map.py <pid>` | `references/memory-runtime.md` |
+| A raw firmware image, no container | `universal-dump.py` | `references/firmware.md`, then `emulation.md` to run it |
+| Wrong architecture, or no way to run the target | emulation is the layer | `references/emulation.md` |
+| The code resists reading | suspect flattening or packing | `references/obfuscation.md` |
 | Picking up an investigation already in progress | `recon-ledger.py gaps` | it names what is open, including unasked categories |
 
 `universal-dump.py` is an orchestrator, not an analyser. It identifies,
@@ -360,6 +365,11 @@ reporting), `tooling.md` (tool selection, probing, fallbacks),
 **Dynamic** — `dynamic-analysis.md`, `memory-runtime.md` (memory maps, address
 spaces, threads, provenance, runtime differential analysis), `frida.md`,
 `gdb.md`, `lldb.md`
+
+**Emulation, firmware, obfuscation** — `emulation.md` (running a target that
+cannot run here, and what a model does not prove), `firmware.md` (raw images,
+vector tables, memory maps without a process), `obfuscation.md` (packing,
+flattening, opaque predicates, encrypted strings, anti-disassembly)
 
 **Comparison** — `binary-diff.md`
 

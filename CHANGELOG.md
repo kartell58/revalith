@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Versions are for the skill, not for a target being analysed.
 
+## [4.3.0] — 2026-10-11
+
+Three domains the skill could not previously answer for, written as
+methodology rather than tooling.
+
+### `emulation.md`
+
+The largest conceptual hole. `reconstruct-legacy-game.md` rests on emulation
+and the topic had one paragraph in `gdb.md`, so an agent following that example
+had nowhere to go.
+
+It covers choosing a level (instruction-level, user-mode, full-system, library
+emulation) and states the cost of each rung before you climb it. The
+Unicorn section is the one that pays: it describes the harness you have to
+write, and the three ways a harness produces a confident wrong answer —
+stopping on a fixed instruction count, zeroing memory that was never
+initialised, and letting an unhooked import return whatever the harness
+returned.
+
+The section that matters most is "what emulation does not prove". A table of
+claims, of what emulation gives you, and of what it does not: that a path runs
+on real hardware, that something takes 3 ms, that no device is required. The
+two conclusions stated outright are that an emulated crash may be the
+emulator's, and that a path which never executes under emulation may execute
+on hardware — so "never observed" is a statement about the model.
+
+### `firmware.md`
+
+An entire domain was absent. Firmware has no container, no program headers, no
+process and no `/proc`, which makes it a content-identification problem before
+it is anything else.
+
+Establishing architecture is ordered by reliability, with the vector table
+first — initial stack pointer, reset handler, interrupt vectors — and what it
+tells you beyond the ISA: the stack pointer marks the top of RAM, which gives
+the flash↔RAM relationship needed to read a `const` table correctly. Region
+classification carries its basis, and the MMIO row says plainly that a region
+at 0x40000000 is consistent with MMIO while the specific peripheral is not
+established.
+
+The `.data` relocation step is called out because it is the one most often
+missed: a non-zero global lives at a different run address in RAM than its
+load address in flash, and reading the flash copy yields the initial value and
+nothing about the current one.
+
+### `obfuscation.md`
+
+Opens with the rule that matters: obfuscation is a hypothesis, not a reading. A
+two-hundred-block graph with a state variable may be flattening, a state
+machine, a protocol dispatcher, or a deliberately unrolled loop — the structure
+is the observation and the name is the interpretation.
+
+One section per family with what to observe and what would confirm it, then a
+closing table with the pattern worth noticing: every technique needing the code
+to be static and readable is the one that breaks, and every technique that
+watches the program run survives. That is why the file sits in the dynamic half
+of the skill.
+
+The "what not to do" section is the disciplined part — do not apply a
+deobfuscator because the pattern resembles a known one, do not `nop` a
+predicate because one path was never taken on the inputs you tried, and do not
+let a deobfuscation script become the artefact, because then the
+reconstruction has no evidence behind it.
+
+No scripts. Firmware scanning without `binwalk` is covered by
+`universal-dump.py`, which reports magic and entropy with offsets and
+provenance without deciding what a region is; heuristic obfuscation detectors
+would be unsound, and an unsound detector that reports "flattened" is worse
+than none.
+
 ## [4.2.0] — 2026-10-11
 
 One store for investigation state, and a determinism gate before any

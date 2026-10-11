@@ -1031,6 +1031,8 @@ unparseable address — all produce a reason, never a plausible value.
 | --- | --- |
 | how to hook, and what it costs | `frida.md`, `dynamic-analysis.md` |
 | how to drive a debugger | `gdb.md`, `lldb.md` |
+| what to do when the target will not run here | `emulation.md` |
+| the region is code, but it was written at runtime | `obfuscation.md` |
 | what the offset now means statically | `elf.md` |
 | what the structure is | `semantic-modeling.md` |
 | how to record the model | `reconstruction.md` |

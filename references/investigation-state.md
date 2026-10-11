@@ -256,4 +256,6 @@ claim stays a hypothesis. `scripts/runtime-events.py --validate` rejects the
 - `methodology.md` — the evidence loop these entries serve
 - `differential-testing.md` — recording tests and what they showed
 - `memory-runtime.md` — the runtime observations that enter here
+- `emulation.md`, `obfuscation.md` — investigations that go through an
+  emulator, or through code that resists reading
 - `templates/reconstruction/README.md` — the full entry schema

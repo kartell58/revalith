@@ -65,6 +65,9 @@ and can be refuted by a test. See
 | RE suites | Ghidra, radare2/rizin, Cutter, Binary Ninja |
 | Dynamic tools | gdb, lldb, Frida, strace, ltrace, `/proc` |
 | Memory & runtime | memory maps, address spaces and ASLR, threads, call stacks, allocation and object lifetime, syscalls, signals and crashes, JNI runtime, provenance |
+| Emulation | qemu-user, full-system, Unicorn harnesses, debugger attachment, what a machine model does not prove |
+| Firmware | raw images, vector tables, memory maps without a process, boot sequence, `.data` relocation, MMIO as evidence |
+| Obfuscation | packing, control-flow flattening, opaque predicates, MBA, encrypted strings, anti-disassembly, VM-based |
 | Analysis | signatures, structures, call graphs, xrefs, binary diffing |
 | Workflow | automated triage, long-running investigation state |
 | Reconstruction | semantic and behavioural modelling, reconstruction ledger, differential testing, reimplementation, porting |
@@ -312,14 +315,15 @@ revalith/
 ├── CONTRIBUTING.md          how to propose changes
 ├── SECURITY.md              reporting and scope of acceptable use
 ├── .gitignore
-├── references/              26 files — loaded on demand, never all at once
+├── references/              29 files — loaded on demand, never all at once
 │   ├── methodology.md       evidence loop, confidence, reporting
 │   ├── tooling.md           tool selection, environment probing, fallbacks
-│   ├── investigation-state.md  dead ends, hypotheses, versioned offsets
+│   ├── investigation-state.md  the ledger: dead ends, hypotheses, what is open
 │   ├── elf.md  pe.md  macho.md  android.md  web-re.md
 │   ├── arm64.md  arm32.md  x86.md
 │   ├── ghidra.md  radare2.md  binary-ninja.md
 │   ├── dynamic-analysis.md  memory-runtime.md  frida.md  gdb.md  lldb.md
+│   ├── emulation.md  firmware.md  obfuscation.md
 │   ├── binary-diff.md
 │   ├── protocols.md
 │   └── reconstruction.md  semantic-modeling.md  behavioral-analysis.md
