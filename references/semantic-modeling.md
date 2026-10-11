@@ -210,6 +210,55 @@ That `contradicting` entry is the useful one. A subsystem with a known
 exception is worth more than a clean story, because it tells you the boundary
 is not where you assumed.
 
+## Ownership and relationships
+
+Most of a reconstruction's cost is in getting lifetime right, and ownership is
+where the evidence is thinnest. Two references to the same object is not two
+owners. A `free` somewhere is not this object's destruction.
+
+Establish ownership from behaviour, and record it as a claim with its basis:
+
+| Observation | Consistent with | Not yet established |
+| --- | --- | --- |
+| alloc in `A`, free in `A` on every path | `A` owns it | that no other holder frees it |
+| refcount hits 0, then exactly one free | reference counted | who holds the count |
+| pointer appears in two structs | two references | which one owns |
+| pointer moves from `X` to `Y` | transfer | whether `X` released it |
+| no free on any observed path | leak, or a longer lifetime | that the object outlives the trace |
+| the same address reused after free | reuse | that the new occupant is related |
+
+The distinction that matters for a reimplementation is who is responsible for
+the destructor. Record the claim as a relationship with a basis, not as prose:
+
+```json
+{"field": "+0x08",
+ "relation": "points at the entity's mesh",
+ "owner": "unknown",
+ "evidence": ["written once at init, read only inside the draw routine"],
+ "counter_evidence": ["no free observed on any traced path, so whether this
+                      reference owns the mesh is unresolved"],
+ "confidence": "low",
+ "next_test": "free the entity and watch whether this pointer's target is
+               freed in the same frame"}
+```
+
+`"owner": "unknown"` is a legitimate and useful answer. Guessing "the scene
+owns it" from the fact that the scene holds a pointer produces a
+reimplementation that double-frees, which is worse than one that leaks.
+
+Three failure modes, in order of how often they appear:
+
+- **Two references read as two owners.** A struct member and a registry entry
+  both pointing at an object is the normal shape of a shared object.
+- **A `free` in the same function read as destruction.** Match the call site
+  to the allocation's, or record the relationship as unestablished.
+- **A missing free read as a leak.** The trace may simply not have covered the
+  path that frees it. "No free observed" is a statement about the trace.
+
+When the language has no manual ownership — a garbage-collected runtime, or a
+target that never frees — the question changes shape rather than disappearing:
+what keeps the object reachable, and until when.
+
 ## Invariants
 
 An invariant is a property that holds across observed states. It is the most
@@ -275,8 +324,17 @@ scripts/recon-ledger.py add ./reconstruction functions 0x8120 \
     --hypothesis "per-frame update of a persistent entity state" \
     --next-test "trace the three writes across two frames" \
     --status hypothesized --confidence low \
+    --supporting "the write to +0x10 follows the read of +0x0c in 40/40 frames" \
+    --contradicting "never reached in the headless run" \
     --related-data entity_state
 ```
+
+`--evidence` records what was seen. `--supporting` records what the claim
+rests on, and `--contradicting` records what argued against it. Keeping the
+three apart is what makes the entry auditable later: an entry that lists only
+support is a summary of the case for a conclusion, not a record of the
+conclusion, and a counter-observation filed once and never revisited is how a
+refuted hypothesis comes back as a fact.
 
 Run `scripts/recon-ledger.py validate` before building on it. The validator
 refuses an entry whose status outruns its evidence, which is the specific

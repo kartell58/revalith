@@ -54,10 +54,24 @@ hypothesis           the interpretation. Separate from evidence: this is the
 confidence           five levels.
 confidence_basis     why that level. Required in practice, not by the
                      validator.
+supporting_observations
+                     what the claim rests on, as distinct from `evidence`,
+                     which records what was seen. An entry with evidence and
+                     nothing here is a summary of the case rather than an
+                     audit of it.
+contradicting        observations that argue against this entry. This is the
+                     field that makes a stale claim catchable months later,
+                     so it is weighed by the validator, not just stored: an
+                     entry cannot be `verified` while carrying
+                     `contradicting` unless `contradiction_resolved` says how
+                     the conflict was settled.
+contradiction_resolved
+                     how a recorded contradiction was answered. Required when
+                     status is `verified` and `contradicting` is not empty;
+                     `null` while it is still open.
 tests                a test that could have failed, and what it showed.
 next_test            what would settle this, when it has not been run.
                      Recording this is not the same as recording a test.
-contradicting        observations that argue against this entry.
 refuted_by           what ruled it out, when status is refuted.
 related_functions    cross-references. These make the entry load-bearing, and
 related_data            `stats` reports assumptions that others depend on.

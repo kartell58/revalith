@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Versions are for the skill, not for a target being analysed.
 
+## [4.1.0] — 2026-10-11
+
+Evidence accounting for the reconstruction ledger, and ownership as a
+modelled relationship.
+
+### Ledger: counter-evidence is weighed, not just stored
+
+The ledger already had a `contradicting` field, and it was written down and
+never looked at again — which meant the field recorded that a disagreement was
+noticed without anything following from it. The failure it permits is
+specific: a hypothesis forms, evidence accumulates, and three weeks later an
+observation that argued against it sits in a list while the entry reads
+`verified`.
+
+The validator now weighs it. An entry cannot be `verified` while carrying
+`contradicting` observations unless `contradiction_resolved` records how the
+conflict was settled, and a `refuted` entry that records counter-evidence must
+say what settled it. A hypothesis carrying counter-evidence stays valid —
+refusing that would only teach people to leave the counter-evidence
+unrecorded, which is worse.
+
+Added the complementary `supporting_observations` field and a `--supporting`
+flag. The split is deliberate: `evidence` records what was seen,
+`supporting_observations` records what the claim rests on, and `contradicting`
+records what argued against it. An entry with evidence and nothing in the other
+two is a summary of the case for a conclusion rather than an audit of it.
+
+### Ownership as a modelled relationship
+
+`semantic-modeling.md` had no ownership section, which left lifetime — the most
+expensive thing to get wrong in a reimplementation — to be inferred from
+prose. It now carries the evidence table for establishing ownership, the
+distinction between a reference and an owner, and the three failure modes that
+recur: two references read as two owners, a `free` in the same function read
+as destruction, and a missing free read as a leak.
+
+`"owner": "unknown"` is documented as a legitimate and useful answer. Guessing
+an owner from the fact that a struct holds a pointer produces a
+reimplementation that double-frees, which is worse than one that leaks.
+
+Selftest 519 -> 529 checks.
+
 ## [4.0.0] — 2026-10-11
 
 Memory and runtime intelligence added as a third layer, alongside static
@@ -73,7 +115,7 @@ event trace, provenance, differential run, and a state model recorded at low
 confidence with its counter-evidence. The measurements and the synthetic parts
 are marked separately, and the example closes with what it does not establish.
 
-Selftest grew from 283 to 519 checks, all offline and deterministic, including
+Selftest grew from 283 to 529 checks, all offline and deterministic, including
 a fixture built so that load-bias arithmetic is genuinely exercised.
 
 Cross-links added from `dynamic-analysis.md`, `frida.md`, `gdb.md`, `lldb.md`,

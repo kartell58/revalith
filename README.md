@@ -232,7 +232,7 @@ evidence recorded.
 ### Verifying the parsers
 
 ```sh
-python3 scripts/selftest.py     # 519 checks, offline, no tools required
+python3 scripts/selftest.py     # 529 checks, offline, no tools required
 ```
 
 Generates ELF, PE, Mach-O, APK and AXML fixtures whose exact contents it

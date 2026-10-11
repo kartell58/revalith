@@ -148,6 +148,18 @@ next one.
 **Record what you skipped.** An unimplemented path that was never exercised is
 not "not needed"; it is untested. Say which.
 
+**Record what argued against a claim.** `--contradicting` is not a place for
+doubt to be vented; it is the field that keeps a stale hypothesis from
+surviving. An entry cannot be `verified` while carrying contradicting
+observations unless `contradiction_resolved` says how the conflict was
+settled, because "verified" means the evidence survived its test and surviving
+is not the same as never having been contradicted.
+
+The failure this prevents is not hypothetical: a hypothesis forms, evidence
+accumulates, and three weeks later the observation that undercut it is sitting
+in a list nobody re-reads, while the entry is quoted as settled in the
+write-up.
+
 ## Fidelity: choose before you start
 
 These are four different goals. Deciding late means discovering the mismatch

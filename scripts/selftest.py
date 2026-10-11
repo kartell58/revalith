@@ -1032,6 +1032,80 @@ def test_recon_ledger_roundtrip(tmp):
         check(True, "unknown ledger category is refused")
 
 
+def test_recon_evidence_accounting_is_weighted():
+    """An entry that knows what argues against it cannot also be settled.
+
+    The failure this prevents is specific: a hypothesis forms, evidence
+    accumulates, and three weeks later an observation that argued against it is
+    buried in a notes field while the entry reads 'verified'. Recording the
+    contradiction is only half the job -- the validator has to weigh it.
+    """
+    ev = ["watchpoint on +0x10 recorded 4 writes from 0x1400"]
+
+    # A hypothesis may carry counter-evidence. That is the normal state of a
+    # claim that has not been settled yet, and refusing it would push people
+    # to leave the counter-evidence unrecorded instead.
+    h = _reconlib.new_entry(name="0x8120", kind="function", status="hypothesized",
+                       evidence=ev, hypothesis="player physics update",
+                       next_test="drive two entities",
+                       contradicting=["never called in a headless run"])
+    eq(_reconlib.validate_entry(h, "function"), [],
+       "a hypothesis with contradicting evidence is valid")
+
+    # 'verified' means the evidence survived its test. Unresolved
+    # contradiction is a different thing, and conflating them is the error.
+    v = _reconlib.new_entry(name="0x8120", kind="function", status="verified",
+                       evidence=ev, tests=["ran 3 inputs, all agreed"],
+                       contradicting=["never called in a headless run"])
+    problems = _reconlib.validate_entry(v, "function")
+    check(any("contradicting" in p for p in problems),
+          "verified with unresolved contradicting evidence is refused")
+    check(any("survived" in p for p in problems),
+          "the refusal says what verified actually means")
+
+    # ... unless the resolution is recorded.
+    resolved = _reconlib.new_entry(
+        name="0x8120", kind="function", status="verified", evidence=ev,
+        tests=["ran 3 inputs", "headless run: not called"],
+        contradicting=["never called in a headless run"],
+        contradiction_resolved="it is the render path; headless has no render")
+    eq(_reconlib.validate_entry(resolved, "function"), [],
+       "verified with the contradiction resolved validates")
+
+    # Refuted entries that record counter-evidence must say what settled it.
+    r = _reconlib.new_entry(name="0x8120", kind="function", status="refuted",
+                       evidence=ev, contradicting=["traced 200 frames, never"])
+    check(_reconlib.validate_entry(r, "function"),
+          "refuted with counter-evidence and nothing settling it is refused")
+    r2 = _reconlib.new_entry(name="0x8120", kind="function", status="refuted",
+                        evidence=ev, contradicting=["traced 200 frames"],
+                        tests=["traced 200 frames, never called"])
+    eq(_reconlib.validate_entry(r2, "function"), [],
+       "refuted with the refuting test recorded validates")
+
+    # An empty string weighs nothing and must not read as though it did.
+    empty = _reconlib.new_entry(name="x", kind="function", status="hypothesized",
+                           evidence=ev, hypothesis="h", next_test="t",
+                           supporting_observations=["", "real"])
+    check(any("weighs nothing" in p for p in _reconlib.validate_entry(empty, "function")),
+          "an empty supporting observation is refused")
+
+    # Both lists must be lists.
+    bad = _reconlib.new_entry(name="x", kind="function", status="hypothesized",
+                         evidence=ev, hypothesis="h", next_test="t")
+    bad["contradicting"] = "a string, not a list"
+    check(any("must be a list" in p for p in _reconlib.validate_entry(bad, "function")),
+          "a non-list contradicting field is refused")
+
+    # The fields round-trip through the builder rather than only via **extra.
+    built = _reconlib.new_entry(name="x", kind="function", status="hypothesized",
+                           evidence=ev, hypothesis="h", next_test="t",
+                           supporting_observations=["a"],
+                           contradicting=["b"])
+    eq(built.get("supporting_observations"), ["a"], "supporting is stored")
+    eq(built.get("contradicting"), ["b"], "contradicting is stored")
+
+
 def test_recon_ledger_validates_seed_templates():
     """The shipped templates must satisfy the validator, or every user's
     first ledger starts with eight reported problems."""
@@ -1972,7 +2046,7 @@ def test_recon_ledger_accepts_runtime_observations():
     import _reconlib as RLec
 
     # A field with a runtime provenance chain: observations become evidence.
-    e = RLec.new_entry(
+    e = _reconlib.new_entry(
         name="entity_state.player_id", kind="structure",
         status="hypothesized",
         evidence=["watchpoint on 0x1000 recorded 4 writes from libfoo.so+0x1400",
@@ -1982,19 +2056,19 @@ def test_recon_ledger_accepts_runtime_observations():
         next_test="drive two players and check whether the two writes "
                   "correspond to the two ids",
         related_functions=["libfoo.so+0x1400"])
-    eq(RLec.validate_entry(e, "structure"), [],
+    eq(_reconlib.validate_entry(e, "structure"), [],
        "a runtime-evidenced entry validates")
 
     # A causal claim with no experiment is refused, as everywhere else.
-    bad = RLec.new_entry(name="x", kind="structure", status="verified",
+    bad = _reconlib.new_entry(name="x", kind="structure", status="verified",
                          evidence=["observed at 0x1000"],
                          tests=["ran twice"],
                          hypothesis="caused by 0x1400")
-    eq(RLec.validate_entry(bad, "structure"), [],
+    eq(_reconlib.validate_entry(bad, "structure"), [],
        "a verified entry with tests validates regardless of hypothesis")
 
     # The load-bearing query sees runtime cross-references.
-    fv = RLec.facts_vs_hypotheses([
+    fv = _reconlib.facts_vs_hypotheses([
         {"name": "libfoo.so+0x1400", "status": "hypothesized",
          "evidence": ["e"], "next_test": "t"},
         {"name": "entity_state.player_id", "status": "hypothesized",
@@ -2111,6 +2185,7 @@ def main():
                    test_report_next_steps_requires_evidence,
                    test_recon_validation_rejects_overreach,
                    test_recon_facts_vs_hypotheses,
+                   test_recon_evidence_accounting_is_weighted,
                    test_recon_ledger_validates_seed_templates,
                    test_recon_trace_first_divergence,
                    test_recon_numeric_causes_are_hypotheses,

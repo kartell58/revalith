@@ -168,6 +168,41 @@ def validate_entry(entry: Dict, kind: Optional[str] = None) -> List[str]:
         if v is not None and not isinstance(v, list):
             problems.append(f"{rel} must be a list")
 
+    # Evidence accounting. A ledger that records only what supports a claim
+    # is a summary of the case for it, not an audit of it. The field that
+    # makes a stale claim catchable months later is the one holding what
+    # argued against it, so it is weighed here rather than merely stored.
+    #
+    # 'contradicting' predates this check and keeps its name; the
+    # complementary list is 'supporting_observations'.
+    supporting = entry.get("supporting_observations")
+    contradicting = entry.get("contradicting")
+    for field, value in (("supporting_observations", supporting),
+                         ("contradicting", contradicting)):
+        if value is not None and not isinstance(value, list):
+            problems.append(f"{field} must be a list")
+        elif isinstance(value, list) and any(
+                isinstance(x, str) and not x.strip() for x in value):
+            problems.append(
+                f"'{field}' contains an empty entry, which weighs nothing and "
+                f"reads as though something did")
+
+    if isinstance(contradicting, list) and contradicting:
+        # An entry that knows what argues against it and still calls itself
+        # settled is the failure this check exists to catch. 'verified' means
+        # the evidence survived its test; surviving is not the same as never
+        # having been contradicted, and the difference has to be recorded.
+        if status == "verified" and not entry.get("contradiction_resolved"):
+            problems.append(
+                "status 'verified' with recorded contradicting observations: "
+                "verified means the evidence survived its test, so either "
+                "record how the contradiction was resolved "
+                "('contradiction_resolved') or the status is wrong")
+        if status == "refuted" and not (entry.get("refuted_by") or tests):
+            problems.append(
+                "contradicting observations recorded but nothing says what "
+                "settled them; add the refuting test, 'refuted_by', or a note")
+
     if entry.get("name") and not str(entry["name"]).strip():
         problems.append("name is empty")
 
@@ -421,6 +456,8 @@ def new_entry(name: str, kind: str, status: str = "unknown",
               observed_behavior: Optional[str] = None,
               next_test: Optional[str] = None,
               notes: Optional[str] = None,
+              supporting_observations: Optional[List[str]] = None,
+              contradicting: Optional[List[str]] = None,
               **extra) -> Dict:
     """Build an entry with the shape the validator expects.
 
@@ -430,6 +467,13 @@ def new_entry(name: str, kind: str, status: str = "unknown",
     ``next_test`` states what would settle the entry without claiming it was
     run. That distinction is what lets a hypothesis be recorded on the day it
     is formed rather than only once it is settled.
+
+    ``supporting_observations`` and ``contradicting`` are the evidence
+    accounting, kept apart from ``evidence`` because they answer a different
+    question. ``evidence`` says what was seen; these say what the claim rests
+    on and what argued against it. An entry recording only support is a summary
+    of the case, not an audit of it, and the second list is the field that
+    makes a stale claim catchable months later.
     """
     entry: Dict[str, Any] = {
         "name": name,
@@ -449,6 +493,10 @@ def new_entry(name: str, kind: str, status: str = "unknown",
         entry["tests"] = list(tests)
     if notes:
         entry["notes"] = notes
+    if supporting_observations:
+        entry["supporting_observations"] = list(supporting_observations)
+    if contradicting:
+        entry["contradicting"] = list(contradicting)
     for k, v in extra.items():
         if v not in (None, [], {}):
             entry[k] = v

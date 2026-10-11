@@ -87,6 +87,8 @@ def cmd_add(args) -> int:
             observed_behavior=args.behavior,
             next_test=args.next_test,
             notes=args.note,
+            supporting_observations=args.supporting,
+            contradicting=args.contradicting,
             address=args.address,
             related_functions=args.related_functions,
             related_data=args.related_data,
@@ -148,6 +150,8 @@ def cmd_update(args) -> int:
             changes[field] = values
     if args.contradicting:
         changes["contradicting"] = args.contradicting
+    if args.supporting:
+        changes["supporting_observations"] = args.supporting
     if args.refuted_by:
         changes["refuted_by"] = args.refuted_by
 
@@ -241,11 +245,11 @@ def cmd_show(args) -> int:
         print(f"=== {cat}.json ===")
         for key in ("name", "kind", "status", "confidence", "address",
                     "hypothesis", "observed_behavior", "notes",
-                    "refuted_by"):
+                    "contradiction_resolved", "refuted_by"):
             if e.get(key):
                 print(f"  {key:<18} {e[key]}")
-        for key in ("evidence", "tests", "contradicting",
-                    "related_functions", "related_data",
+        for key in ("evidence", "supporting_observations", "tests",
+                    "contradicting", "related_functions", "related_data",
                     "related_structures"):
             vals = e.get(key)
             if vals:
@@ -379,9 +383,14 @@ def main() -> int:
     p.add_argument("--next-test", default=None,
                    help="what would settle this entry; recording it does not "
                         "claim the test was run")
+    p.add_argument("--supporting", action="append", default=[],
+                   help="an observation the claim rests on, as distinct from "
+                        "--evidence which records what was seen (repeatable)")
     p.add_argument("--contradicting", action="append", default=[],
                    help="an observation that argues against this entry "
-                        "(repeatable)")
+                        "(repeatable). Recording one alongside status "
+                        "'verified' is refused unless you say how it was "
+                        "resolved")
     p.add_argument("--hypothesis", default=None)
     p.add_argument("--behavior", default=None,
                    help="what was actually observed happening")

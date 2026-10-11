@@ -288,7 +288,7 @@ reconstruction scripts, `_runtimelib.py` for the memory and runtime ones, and
 Verify the parsers at any time:
 
 ```sh
-python3 scripts/selftest.py     # 519 checks, offline, no tools required
+python3 scripts/selftest.py     # 529 checks, offline, no tools required
 ```
 
 Quick start:

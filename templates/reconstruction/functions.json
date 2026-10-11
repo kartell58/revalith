@@ -22,6 +22,14 @@
       "confidence": "low",
       "confidence_basis": "call frequency and access pattern are consistent with an update, but nothing shows what it computes",
       "next_test": "trace the writes to +0x08/+0x0c/+0x10 across two consecutive frames and see whether they advance together",
+      "supporting_observations": [
+        "EXAMPLE, replace: the write to +0x10 follows the read of +0x0c by 0-2 instructions in 40 of 40 sampled frames",
+        "EXAMPLE: the same pointer reaches this call on consecutive frames"
+      ],
+      "contradicting": [
+        "EXAMPLE: never reached in the headless run, so the per-frame claim rests on the windowed run alone"
+      ],
+      "contradiction_resolved": null,
       "related_data": [
         "entity_state"
       ]
